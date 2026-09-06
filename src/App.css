@@ -281,6 +281,14 @@ textarea:focus {
 .section-top .time {
   color: #7a8494;
   font-size: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.1rem;
+  text-align: right;
+  line-height: 1.25;
+}
+.section-top .time-line {
   white-space: nowrap;
 }
 

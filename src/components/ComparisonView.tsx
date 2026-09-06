@@ -25,7 +25,7 @@ function scoreClass(s: SectionScore): string {
 }
 
 function formatRange(start: number, end: number): string {
-  return `${start.toFixed(1)}s – ${end.toFixed(1)}s`
+  return `${start.toFixed(1)}–${end.toFixed(1)}s`
 }
 
 export function ComparisonView({ take, onAnalyzed }: Props) {
@@ -384,9 +384,14 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
                   <div className="section-top">
                     <strong>{sec.label}</strong>
                     <span className="time">
-                      {isComparison && refStart != null && refEnd != null
-                        ? `Alexia ${formatRange(sec.startSec, sec.endSec)} · Ref ${formatRange(refStart, refEnd)}`
-                        : formatRange(sec.startSec, sec.endSec)}
+                      {isComparison && refStart != null && refEnd != null ? (
+                        <>
+                          <span className="time-line">Alexia {formatRange(sec.startSec, sec.endSec)}</span>
+                          <span className="time-line">Ref {formatRange(refStart, refEnd)}</span>
+                        </>
+                      ) : (
+                        formatRange(sec.startSec, sec.endSec)
+                      )}
                     </span>
                   </div>
                   <div className="score-row">

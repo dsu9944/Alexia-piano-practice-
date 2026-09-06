@@ -4,7 +4,14 @@ const SECTION_COUNT = 6
 const FRAME_SIZE = 2048
 const HOP_SIZE = 512
 /** Downsample length for DTW (balance quality vs browser CPU). */
-const DTW_POINTS = 96
+const DTW_POINTS = 176
+/** Relative + absolute RMS floors for silence trim. */
+const SILENCE_REL = 0.02
+const SILENCE_ABS = 0.0015
+const SILENCE_PAD_SEC = 0.12
+/** Clamp mapped section length vs expected (refLen * globalTempo). */
+const DUR_CLAMP_LO = 0.55
+const DUR_CLAMP_HI = 1.8
 
 export async function decodeAudioBlob(blob: Blob): Promise<AudioBuffer> {
   const ctx = new AudioContext()
@@ -45,6 +52,54 @@ function computeRmsEnvelope(samples: Float32Array, sampleRate: number): { times:
     times[i] = (start + FRAME_SIZE / 2) / sampleRate
   }
   return { times, rms }
+}
+
+/**
+ * Trim leading/trailing low-RMS silence. Returns a view into the active region
+ * plus the offset (seconds) of that region in the original timeline so playback
+ * times can be mapped back.
+ */
+function trimSilence(
+  samples: Float32Array,
+  sampleRate: number,
+): { samples: Float32Array; offsetSec: number; activeDurationSec: number; originalDurationSec: number } {
+  const originalDurationSec = samples.length / sampleRate
+  if (samples.length < FRAME_SIZE * 2) {
+    return {
+      samples,
+      offsetSec: 0,
+      activeDurationSec: originalDurationSec,
+      originalDurationSec,
+    }
+  }
+
+  const { rms } = computeRmsEnvelope(samples, sampleRate)
+  let peak = 0
+  for (let i = 0; i < rms.length; i++) peak = Math.max(peak, rms[i])
+  const threshold = Math.max(peak * SILENCE_REL, SILENCE_ABS)
+
+  let first = 0
+  while (first < rms.length && rms[first] < threshold) first++
+  let last = rms.length - 1
+  while (last > first && rms[last] < threshold) last--
+
+  if (first >= last) {
+    return {
+      samples,
+      offsetSec: 0,
+      activeDurationSec: originalDurationSec,
+      originalDurationSec,
+    }
+  }
+
+  const padSamples = Math.floor(SILENCE_PAD_SEC * sampleRate)
+  const startSample = Math.max(0, first * HOP_SIZE - padSamples)
+  const endSample = Math.min(samples.length, last * HOP_SIZE + FRAME_SIZE + padSamples)
+  const trimmed = samples.subarray(startSample, endSample)
+  const offsetSec = startSample / sampleRate
+  const activeDurationSec = trimmed.length / sampleRate
+
+  return { samples: trimmed, offsetSec, activeDurationSec, originalDurationSec }
 }
 
 /** Onset strength: positive first difference of RMS, floored at 0 */
@@ -230,6 +285,7 @@ function dtwPath(a: Float32Array, b: Float32Array): [number, number][] {
 /**
  * Map a reference time (seconds) → student time via DTW path.
  * path entries are [studentFrame, refFrame] in downsampled index space.
+ * Times are on the *active* (silence-trimmed) timelines.
  */
 function mapRefTimeToStudent(
   refSec: number,
@@ -295,13 +351,11 @@ function referenceSectionBoundaries(
       smoothRms[i] <= meanRms * 0.85
     const onsetLull = smoothOnsets[i] <= meanOnset * 0.55
     if (!isValley && !onsetLull) continue
-    // Prefer deeper valleys / quieter lulls
     const depth = meanRms > 1e-9 ? 1 - smoothRms[i] / meanRms : 0
     const lull = meanOnset > 1e-9 ? 1 - smoothOnsets[i] / Math.max(meanOnset, 1e-9) : 0
     candidates.push({ t, score: depth * 0.6 + lull * 0.4 })
   }
 
-  // Greedy pick of well-spaced high-score valleys
   candidates.sort((a, b) => b.score - a.score)
   const picked: number[] = []
   for (const c of candidates) {
@@ -314,15 +368,12 @@ function referenceSectionBoundaries(
 
   let interiors: number[]
   if (picked.length >= count - 1) {
-    // Choose count-1 boundaries closest to ideal equal-ish spacing by musical progress
     interiors = pickEvenlyFromCandidates(picked, count - 1, duration)
   } else {
-    // Fallback: equal cumulative onset-energy quantiles on the reference
     interiors = cumulativeOnsetBoundaries(times, onsets, duration, count - 1)
   }
 
   const bounds = [0, ...interiors, duration]
-  // Enforce monotonic + minimum width
   const minWidth = Math.max(0.35, duration / (count * 4))
   for (let i = 1; i < bounds.length; i++) {
     if (bounds[i] < bounds[i - 1] + minWidth) {
@@ -385,56 +436,73 @@ function cumulativeOnsetBoundaries(
 }
 
 /**
- * Given reference section boundaries, map each to Alexia's timeline via DTW
- * on onset/energy envelopes so tempo differences stretch/compress sections.
+ * Map each reference section to Alexia's timeline via DTW.
+ * Uses mapped windows directly — does NOT redistribute to cover the full take.
+ * Clamps each window length to [0.55, 1.8] × (refLen * globalTempo), centered on
+ * the DTW midpoint. Only light overlap repair (split at midpoint); gaps OK.
  */
 function mapRefSectionsToStudent(
   refBounds: number[],
   path: [number, number][],
-  refDuration: number,
-  studentDuration: number,
+  refActiveDur: number,
+  studentActiveDur: number,
   nRef: number,
   nStudent: number,
 ): { rStart: number; rEnd: number; sStart: number; sEnd: number }[] {
   const count = refBounds.length - 1
-  const raw = []
+  const globalTempo = studentActiveDur / Math.max(1e-6, refActiveDur)
+  const minWidth = Math.max(0.12, studentActiveDur / (count * 12))
+
+  const windows: { rStart: number; rEnd: number; sStart: number; sEnd: number }[] = []
   for (let i = 0; i < count; i++) {
     const rStart = refBounds[i]
     const rEnd = refBounds[i + 1]
-    const sStart = mapRefTimeToStudent(rStart, path, refDuration, studentDuration, nRef, nStudent)
-    const sEnd = mapRefTimeToStudent(rEnd, path, refDuration, studentDuration, nRef, nStudent)
-    raw.push({ rStart, rEnd, sStart, sEnd })
+    let sStart = mapRefTimeToStudent(rStart, path, refActiveDur, studentActiveDur, nRef, nStudent)
+    let sEnd = mapRefTimeToStudent(rEnd, path, refActiveDur, studentActiveDur, nRef, nStudent)
+    if (sEnd < sStart) {
+      const tmp = sStart
+      sStart = sEnd
+      sEnd = tmp
+    }
+
+    const refLen = Math.max(0.001, rEnd - rStart)
+    const expected = refLen * globalTempo
+    const mappedLen = Math.max(0, sEnd - sStart)
+    const lo = DUR_CLAMP_LO * expected
+    const hi = DUR_CLAMP_HI * expected
+    const mid = (sStart + sEnd) / 2
+    const clampedLen = Math.max(lo, Math.min(hi, mappedLen || expected))
+    sStart = mid - clampedLen / 2
+    sEnd = mid + clampedLen / 2
+
+    sStart = Math.max(0, Math.min(studentActiveDur, sStart))
+    sEnd = Math.max(0, Math.min(studentActiveDur, sEnd))
+    if (sEnd - sStart < minWidth) {
+      const grow = minWidth - (sEnd - sStart)
+      sStart = Math.max(0, sStart - grow / 2)
+      sEnd = Math.min(studentActiveDur, sStart + minWidth)
+      sStart = Math.max(0, sEnd - minWidth)
+    }
+
+    windows.push({ rStart, rEnd, sStart, sEnd })
   }
 
-  // Enforce contiguous, monotonic Alexia windows (no overlap / reordering).
-  const minWidth = Math.max(0.2, studentDuration / (count * 5))
-  const sBounds = new Array<number>(count + 1)
-  sBounds[0] = 0
-  sBounds[count] = studentDuration
-  for (let i = 1; i < count; i++) {
-    // Prefer mapped start of section i (≈ end of i-1)
-    const mapped = 0.5 * (raw[i - 1].sEnd + raw[i].sStart)
-    sBounds[i] = mapped
-  }
-  for (let i = 1; i < count; i++) {
-    if (sBounds[i] < sBounds[i - 1] + minWidth) {
-      sBounds[i] = sBounds[i - 1] + minWidth
+  // Light overlap fix only: split conflicting bounds at midpoint. Gaps stay.
+  for (let i = 0; i < windows.length - 1; i++) {
+    if (windows[i].sEnd > windows[i + 1].sStart) {
+      const mid = 0.5 * (windows[i].sEnd + windows[i + 1].sStart)
+      windows[i].sEnd = mid
+      windows[i + 1].sStart = mid
     }
   }
-  for (let i = count - 1; i >= 1; i--) {
-    if (sBounds[i] > sBounds[i + 1] - minWidth) {
-      sBounds[i] = Math.max(sBounds[i - 1] + minWidth, sBounds[i + 1] - minWidth)
-    }
-  }
-  sBounds[0] = 0
-  sBounds[count] = studentDuration
 
-  return raw.map((w, i) => ({
-    rStart: w.rStart,
-    rEnd: w.rEnd,
-    sStart: sBounds[i],
-    sEnd: sBounds[i + 1],
-  }))
+  for (const w of windows) {
+    if (w.sEnd < w.sStart + minWidth) {
+      w.sEnd = Math.min(studentActiveDur, w.sStart + minWidth)
+    }
+  }
+
+  return windows
 }
 
 export async function analyzeSolo(studentBlob: Blob): Promise<AnalysisResult> {
@@ -491,32 +559,51 @@ export async function analyzeSolo(studentBlob: Blob): Promise<AnalysisResult> {
 
 export async function analyzeComparison(studentBlob: Blob, referenceBlob: Blob): Promise<AnalysisResult> {
   const [studentBuf, refBuf] = await Promise.all([decodeAudioBlob(studentBlob), decodeAudioBlob(referenceBlob)])
-  const sMono = getMono(studentBuf)
-  const rMono = getMono(refBuf)
-  const sEnv = computeRmsEnvelope(sMono, studentBuf.sampleRate)
-  const rEnv = computeRmsEnvelope(rMono, refBuf.sampleRate)
+  const sFull = getMono(studentBuf)
+  const rFull = getMono(refBuf)
+
+  // Trim leading/trailing silence so DTW/section mapping ignore dead air.
+  const sTrim = trimSilence(sFull, studentBuf.sampleRate)
+  const rTrim = trimSilence(rFull, refBuf.sampleRate)
+
+  const sEnv = computeRmsEnvelope(sTrim.samples, studentBuf.sampleRate)
+  const rEnv = computeRmsEnvelope(rTrim.samples, refBuf.sampleRate)
   const sOnsets = onsetStrength(sEnv.rms)
   const rOnsets = onsetStrength(rEnv.rms)
 
   const count = SECTION_COUNT
-  const refDuration = refBuf.duration
+  const refActiveDur = rTrim.activeDurationSec
+  const studentActiveDur = sTrim.activeDurationSec
   const studentDuration = studentBuf.duration
 
-  // 1) Sections come from the REFERENCE (phrase valleys / onset-energy progress).
-  const refBounds = referenceSectionBoundaries(rEnv.times, rEnv.rms, rOnsets, refDuration, count)
+  // Metrics for scoring need times on the original timeline (playback uses offsets).
+  // Rebuild full envelopes for sectionMetrics on original audio.
+  const sFullEnv = computeRmsEnvelope(sFull, studentBuf.sampleRate)
+  const rFullEnv = computeRmsEnvelope(rFull, refBuf.sampleRate)
+  const sFullOnsets = onsetStrength(sFullEnv.rms)
+  const rFullOnsets = onsetStrength(rFullEnv.rms)
 
-  // 2) DTW-align Alexia ↔ reference on onset/energy so each ref section maps to her time range.
+  // 1) Sections from the REFERENCE active region (phrase valleys / onset-energy).
+  const refBoundsActive = referenceSectionBoundaries(rEnv.times, rEnv.rms, rOnsets, refActiveDur, count)
+
+  // 2) DTW-align on silence-trimmed onset/energy features.
   const n = DTW_POINTS
   const sFeat = alignmentFeature(sEnv.rms, sOnsets, n)
   const rFeat = alignmentFeature(rEnv.rms, rOnsets, n)
   const path = dtwPath(sFeat, rFeat) // [studentFrame, refFrame]
-  const windows = mapRefSectionsToStudent(refBounds, path, refDuration, studentDuration, n, n)
+  const windowsActive = mapRefSectionsToStudent(refBoundsActive, path, refActiveDur, studentActiveDur, n, n)
 
   const sections: SectionAnalysis[] = []
   for (let i = 0; i < count; i++) {
-    const { rStart, rEnd, sStart, sEnd } = windows[i]
-    const sM = sectionMetrics(sEnv.times, sEnv.rms, sOnsets, sStart, sEnd)
-    const rM = sectionMetrics(rEnv.times, rEnv.rms, rOnsets, rStart, rEnd)
+    const { rStart, rEnd, sStart, sEnd } = windowsActive[i]
+    // Map active-region times back onto original audio timelines for playback.
+    const sStartOrig = sStart + sTrim.offsetSec
+    const sEndOrig = sEnd + sTrim.offsetSec
+    const rStartOrig = rStart + rTrim.offsetSec
+    const rEndOrig = rEnd + rTrim.offsetSec
+
+    const sM = sectionMetrics(sFullEnv.times, sFullEnv.rms, sFullOnsets, sStartOrig, sEndOrig)
+    const rM = sectionMetrics(rFullEnv.times, rFullEnv.rms, rFullOnsets, rStartOrig, rEndOrig)
 
     const tempoRatio = rM.tempoProxy > 1e-8 ? sM.tempoProxy / rM.tempoProxy : 1
     const volRatio = rM.volumeRms > 1e-8 ? sM.volumeRms / rM.volumeRms : 1
@@ -535,10 +622,8 @@ export async function analyzeComparison(studentBlob: Blob, referenceBlob: Blob):
     sections.push({
       index: i,
       label: labelFor(i, count),
-      // Alexia’s DTW-aligned window for this musical section
       startSec: sM.startSec,
       endSec: sM.endSec,
-      // Canonical section on the reference performance
       refStartSec: rM.startSec,
       refEndSec: rM.endSec,
       tempoScore,
@@ -553,16 +638,17 @@ export async function analyzeComparison(studentBlob: Blob, referenceBlob: Blob):
   }
 
   const hone = sections.filter((s) => s.overall !== 'green').map((s) => s.label)
-  const durDiff = Math.abs(studentDuration - refDuration) / Math.max(refDuration, 0.001)
+  const activeDurDiff =
+    Math.abs(studentActiveDur - refActiveDur) / Math.max(refActiveDur, 0.001)
   const durNote =
-    durDiff > 0.25
-      ? ` Note: take length differs from reference by ${Math.round(durDiff * 100)}% — DTW stretches sections to match.`
+    activeDurDiff > 0.25
+      ? ` Note: active take length differs from reference by ${Math.round(activeDurDiff * 100)}% — section windows follow DTW (clamped), not full-file padding.`
       : ''
 
   const summary =
     hone.length === 0
-      ? `Nice work — sections look close to your reference (tempo proxy + volume). Sections are defined on the reference, then DTW-aligned to Alexia’s take.${durNote}`
-      : `Hone these sections: ${hone.join(', ')}. Sections follow the reference performance (phrase/energy boundaries); Alexia’s windows are DTW-aligned so Play both compares the same musical part even if tempos differ.${durNote}`
+      ? `Nice work — sections look close to your reference (tempo proxy + volume). Sections are defined on the reference, then DTW-aligned to Alexia’s take (silence-trimmed).${durNote}`
+      : `Hone these sections: ${hone.join(', ')}. Sections follow the reference performance (phrase/energy boundaries); Alexia’s windows are DTW-aligned (silence-trimmed, duration-clamped) so Play both compares the same musical part even if tempos differ.${durNote}`
 
   return {
     mode: 'comparison',

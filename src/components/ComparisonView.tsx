@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { analyzeComparison, analyzeSolo } from '../lib/audioAnalysis'
+import { analyzeComparison, analyzeSolo, AudioDecodeError } from '../lib/audioAnalysis'
+import { reviveAudioBlob } from '../lib/audioMime'
 import type { AnalysisResult, SectionAnalysis, SectionScore, Take } from '../types'
 
 export type AnalyzedPayload = {
@@ -47,17 +48,39 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
   const chainTokenRef = useRef(0)
   const endResolverRef = useRef<((completed: boolean) => void) | null>(null)
 
+  // Rebuild object URL only when the take audio identity changes — not when
+  // analysis/reference metadata updates after Compare (avoids Safari “Error”).
+  const takeAudioKey = take ? `${take.id}:${take.blob.size}:${take.blob.type}` : ''
   useEffect(() => {
     if (!take) {
       setAlexiaUrl(null)
       return
     }
-    const url = URL.createObjectURL(take.blob)
-    setAlexiaUrl(url)
+    let cancelled = false
+    const created: string[] = []
+    const blob = take.blob
+    void (async () => {
+      let url: string
+      try {
+        const revived = await reviveAudioBlob(blob)
+        url = URL.createObjectURL(revived)
+      } catch {
+        url = URL.createObjectURL(blob)
+      }
+      created.push(url)
+      if (cancelled) {
+        URL.revokeObjectURL(url)
+        return
+      }
+      setAlexiaUrl(url)
+    })()
     return () => {
-      URL.revokeObjectURL(url)
+      cancelled = true
+      created.forEach((u) => URL.revokeObjectURL(u))
     }
-  }, [take])
+    // takeAudioKey captures id/size/type; blob read above from current take
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [takeAudioKey])
 
   useEffect(() => {
     if (!refBlob) {
@@ -243,20 +266,38 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
           setBusy(false)
           return
         }
-        analysis = await analyzeComparison(take.blob, refBlob)
+        // Revive blobs before decode — helps Safari after IndexedDB restore.
+        const student = await reviveAudioBlob(take.blob)
+        const reference = await reviveAudioBlob(
+          refBlob,
+          refBlob.type || undefined,
+        )
+        analysis = await analyzeComparison(student, reference, {
+          referenceFileName: refFileName ?? undefined,
+        })
         setResult(analysis)
+        // Keep in-memory analysis even if IDB persist of reference later fails.
         onAnalyzed(take.id, {
           result: analysis,
-          reference: { blob: refBlob, fileName: refFileName ?? undefined },
+          reference: { blob: reference, fileName: refFileName ?? undefined },
         })
       } else {
-        analysis = await analyzeSolo(take.blob)
+        const student = await reviveAudioBlob(take.blob)
+        analysis = await analyzeSolo(student)
         setResult(analysis)
         onAnalyzed(take.id, { result: analysis })
       }
     } catch (err) {
       console.error(err)
-      setError('Analysis failed. Try a different audio format (wav/mp3/m4a/webm).')
+      if (err instanceof AudioDecodeError) {
+        setError(err.message)
+      } else if (err instanceof Error && err.message) {
+        setError(`Analysis failed: ${err.message}`)
+      } else {
+        setError(
+          'Analysis failed. Try a .m4a / .wav / .mp3 reference, or Download the take and re-import.',
+        )
+      }
     } finally {
       setBusy(false)
     }
@@ -296,8 +337,20 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
               const f = e.target.files?.[0] ?? null
               stopPlayback()
               if (f) {
-                setRefBlob(f)
                 setRefFileName(f.name)
+                void (async () => {
+                  try {
+                    const name = f.name.toLowerCase()
+                    let preferred: string | undefined
+                    if (name.endsWith('.m4a') || name.endsWith('.mp4')) preferred = 'audio/mp4'
+                    else if (name.endsWith('.mp3')) preferred = 'audio/mpeg'
+                    else if (name.endsWith('.wav')) preferred = 'audio/wav'
+                    const revived = await reviveAudioBlob(f, preferred || f.type || undefined)
+                    setRefBlob(revived)
+                  } catch {
+                    setRefBlob(f)
+                  }
+                })()
               } else {
                 setRefBlob(null)
                 setRefFileName(null)

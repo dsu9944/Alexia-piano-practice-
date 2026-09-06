@@ -40,13 +40,18 @@ export function TakesList({ takes, selectedId, onSelect, onDelete, onUpdateNotes
   const [playErrors, setPlayErrors] = useState<Record<string, string>>({})
   const [retryIndex, setRetryIndex] = useState<Record<string, number>>({})
 
+  // Only rebuild players when audio identity changes — not after Compare
+  // updates analysis/reference on the same take blob (Safari “Error” flicker).
+  const audioKey = takes.map((t) => `${t.id}:${t.blob.size}:${t.blob.type}`).join('|')
+
   useEffect(() => {
     let cancelled = false
     const created: string[] = []
+    const snapshot = takes
 
     void (async () => {
       const next: Record<string, string> = {}
-      for (const t of takes) {
+      for (const t of snapshot) {
         try {
           const revived = await reviveAudioBlob(t.blob)
           const url = URL.createObjectURL(revived)
@@ -71,7 +76,8 @@ export function TakesList({ takes, selectedId, onSelect, onDelete, onUpdateNotes
       cancelled = true
       created.forEach((u) => URL.revokeObjectURL(u))
     }
-  }, [takes])
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by audioKey
+  }, [audioKey])
 
   const handleAudioError = async (take: Take) => {
     const idx = retryIndex[take.id] ?? 0

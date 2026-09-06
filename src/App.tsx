@@ -110,35 +110,27 @@ export default function App() {
 
   const handleAnalyzed = async (takeId: string, payload: AnalyzedPayload) => {
     const { result, reference } = payload
+    // Always keep analysis in memory first — never wipe the take if IDB persist fails.
+    const patch = (t: Take): Take => {
+      if (t.id !== takeId) return t
+      return {
+        ...t,
+        // Preserve the exact same blob reference so Saved Takes <audio> URLs stay valid.
+        blob: t.blob,
+        analysis: result,
+        ...(reference
+          ? { referenceBlob: reference.blob, referenceFileName: reference.fileName }
+          : {}),
+      }
+    }
+    setTakes((prev) => prev.map(patch))
+    setSelectedTake((prev) => (prev && prev.id === takeId ? patch(prev) : prev))
+
     try {
       await updateTakeAnalysis(takeId, result, reference)
     } catch (err) {
-      console.error('Failed to persist analysis (take audio is still safe):', err)
+      console.error('Failed to persist analysis (take audio + on-screen result are still safe):', err)
     }
-    setTakes((prev) =>
-      prev.map((t) =>
-        t.id === takeId
-          ? {
-              ...t,
-              analysis: result,
-              ...(reference
-                ? { referenceBlob: reference.blob, referenceFileName: reference.fileName }
-                : {}),
-            }
-          : t,
-      ),
-    )
-    setSelectedTake((prev) =>
-      prev && prev.id === takeId
-        ? {
-            ...prev,
-            analysis: result,
-            ...(reference
-              ? { referenceBlob: reference.blob, referenceFileName: reference.fileName }
-              : {}),
-          }
-        : prev,
-    )
   }
 
   const handleNotesChange = (text: string) => {

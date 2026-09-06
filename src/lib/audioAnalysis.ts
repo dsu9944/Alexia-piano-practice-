@@ -13,13 +13,110 @@ const SILENCE_PAD_SEC = 0.12
 const DUR_CLAMP_LO = 0.55
 const DUR_CLAMP_HI = 1.8
 
-export async function decodeAudioBlob(blob: Blob): Promise<AudioBuffer> {
+/** Guess mime from filename (Voice Memos are often .m4a with empty type). */
+function guessMimeFromName(name?: string): string | undefined {
+  if (!name) return undefined
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.m4a') || lower.endsWith('.mp4') || lower.endsWith('.aac')) return 'audio/mp4'
+  if (lower.endsWith('.mp3')) return 'audio/mpeg'
+  if (lower.endsWith('.wav')) return 'audio/wav'
+  if (lower.endsWith('.webm')) return 'audio/webm'
+  if (lower.endsWith('.ogg') || lower.endsWith('.oga')) return 'audio/ogg'
+  return undefined
+}
+
+const DECODE_MIME_CANDIDATES = [
+  'audio/mp4',
+  'audio/x-m4a',
+  'audio/aac',
+  'audio/mpeg',
+  'audio/wav',
+  'audio/webm',
+  'audio/ogg',
+] as const
+
+export class AudioDecodeError extends Error {
+  constructor(
+    message: string,
+    public readonly which: 'take' | 'reference' | 'audio',
+  ) {
+    super(message)
+    this.name = 'AudioDecodeError'
+  }
+}
+
+/**
+ * Safari is strict: IndexedDB blobs / Voice Memos often need a fresh ArrayBuffer
+ * copy (and sometimes an explicit mime wrap) before decodeAudioData succeeds —
+ * even when <audio> can play the same bytes.
+ */
+export async function decodeAudioBlob(
+  blob: Blob,
+  opts?: { fileName?: string; which?: 'take' | 'reference' | 'audio' },
+): Promise<AudioBuffer> {
+  const which = opts?.which ?? 'audio'
+  const raw = await blob.arrayBuffer()
+  const bytes = new Uint8Array(raw)
+
+  const types: string[] = []
+  const push = (t?: string) => {
+    if (!t) return
+    const base = t.split(';')[0].trim()
+    if (base && !types.includes(base)) types.push(base)
+  }
+  push(blob.type)
+  push(guessMimeFromName(opts?.fileName))
+  for (const t of DECODE_MIME_CANDIDATES) push(t)
+
   const ctx = new AudioContext()
   try {
-    const arrayBuffer = await blob.arrayBuffer()
-    return await ctx.decodeAudioData(arrayBuffer.slice(0))
+    if (ctx.state === 'suspended') {
+      try {
+        await ctx.resume()
+      } catch {
+        // ignore — still try decode
+      }
+    }
+
+    let lastErr: unknown
+    for (const type of types) {
+      try {
+        // Fresh copy each attempt — Safari may detach the buffer on failure.
+        const copy = bytes.slice().buffer
+        const wrapped = new Blob([copy], { type })
+        const ab = await wrapped.arrayBuffer()
+        return await ctx.decodeAudioData(ab.slice(0))
+      } catch (err) {
+        lastErr = err
+      }
+    }
+
+    // Last resort: decode the raw copy with no Blob wrap
+    try {
+      return await ctx.decodeAudioData(bytes.slice().buffer)
+    } catch (err) {
+      lastErr = err
+    }
+
+    const label =
+      which === 'take'
+        ? "Couldn't read Alexia's take"
+        : which === 'reference'
+          ? "Couldn't read the reference file"
+          : "Couldn't decode audio"
+    const detail =
+      lastErr instanceof Error && lastErr.message ? ` (${lastErr.message})` : ''
+    void lastErr
+    throw new AudioDecodeError(
+      `${label}. Try Download on the take, or re-export the Voice Memo as .m4a / .wav.${detail}`,
+      which,
+    )
   } finally {
-    await ctx.close()
+    try {
+      await ctx.close()
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -506,7 +603,7 @@ function mapRefSectionsToStudent(
 }
 
 export async function analyzeSolo(studentBlob: Blob): Promise<AnalysisResult> {
-  const buffer = await decodeAudioBlob(studentBlob)
+  const buffer = await decodeAudioBlob(studentBlob, { which: 'take' })
   const mono = getMono(buffer)
   const { times, rms } = computeRmsEnvelope(mono, buffer.sampleRate)
   const onsets = onsetStrength(rms)
@@ -557,8 +654,35 @@ export async function analyzeSolo(studentBlob: Blob): Promise<AnalysisResult> {
   }
 }
 
-export async function analyzeComparison(studentBlob: Blob, referenceBlob: Blob): Promise<AnalysisResult> {
-  const [studentBuf, refBuf] = await Promise.all([decodeAudioBlob(studentBlob), decodeAudioBlob(referenceBlob)])
+export async function analyzeComparison(
+  studentBlob: Blob,
+  referenceBlob: Blob,
+  opts?: { referenceFileName?: string },
+): Promise<AnalysisResult> {
+  // Decode separately so Safari failures name take vs reference clearly.
+  let studentBuf: AudioBuffer
+  try {
+    studentBuf = await decodeAudioBlob(studentBlob, { which: 'take' })
+  } catch (err) {
+    if (err instanceof AudioDecodeError) throw err
+    throw new AudioDecodeError(
+      "Couldn't read Alexia's take. Try Download, or record again in this browser.",
+      'take',
+    )
+  }
+  let refBuf: AudioBuffer
+  try {
+    refBuf = await decodeAudioBlob(referenceBlob, {
+      which: 'reference',
+      fileName: opts?.referenceFileName,
+    })
+  } catch (err) {
+    if (err instanceof AudioDecodeError) throw err
+    throw new AudioDecodeError(
+      "Couldn't read the reference file. Voice Memos usually work as .m4a — try Export or a .wav/.mp3.",
+      'reference',
+    )
+  }
   const sFull = getMono(studentBuf)
   const rFull = getMono(refBuf)
 

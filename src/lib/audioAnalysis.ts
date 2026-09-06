@@ -9,9 +9,11 @@ const DTW_POINTS = 176
 const SILENCE_REL = 0.02
 const SILENCE_ABS = 0.0015
 const SILENCE_PAD_SEC = 0.12
-/** Clamp mapped section length vs expected (refLen * globalTempo). Prefer short. */
-const DUR_CLAMP_LO = 0.5
-const DUR_CLAMP_HI = 1.15
+/** Balanced length vs expected (refLen * studentActive/refActive). */
+const DUR_EXPAND_BELOW = 0.7
+const DUR_SHRINK_ABOVE = 1.35
+/** Mild valley snap only when slightly long — not an aggressive hard cap. */
+const DUR_MILD_LONG = 1.15
 
 /** Guess mime from filename (Voice Memos are often .m4a with empty type). */
 function guessMimeFromName(name?: string): string | undefined {
@@ -498,7 +500,7 @@ function referenceSectionBoundaries(
   }
 
   // Extra early bias (~0.45s): previous section must not eat the next attack.
-  const EARLY_PULL_SEC = 0.45
+  const EARLY_PULL_SEC = 0.4
   const minWidth = Math.max(0.35, duration / (count * 4))
   const pulled: number[] = []
   for (let idx = 0; idx < interiors.length; idx++) {
@@ -647,10 +649,12 @@ function snapStudentEndEarlier(
 }
 
 /**
- * Map each reference section to Alexia's timeline via DTW.
- * Prefers SHORTER Alexia windows (clamp ~[0.5, 1.2]× expected), anchors at the
- * DTW start (does not center-expand), snaps end earlier to a valley, and never
- * extends past the DTW-mapped start of the next section. Overlaps: cut earlier end only.
+ * Map each reference section to Alexia's timeline via DTW (balanced length).
+ * Start from DTW [sStart,sEnd]. expected = refLen * (studentActive/refActive).
+ * If mapped > 1.35×expected → shrink (fix spill). If mapped < 0.7×expected →
+ * expand toward expected (fix too-short), staying before next mapped start.
+ * Never eat the next phrase; prefer not truncating the current phrase early.
+ * Overlaps: cut earlier end only.
  */
 function mapRefSectionsToStudent(
   refBounds: number[],
@@ -668,7 +672,6 @@ function mapRefSectionsToStudent(
   const minWidth = Math.max(0.12, studentActiveDur / (count * 12))
   const gapEps = 0.02
 
-  // Precompute DTW-mapped starts so each section can hard-cap before the next.
   const mappedStarts: number[] = []
   const mappedEnds: number[] = []
   for (let i = 0; i < count; i++) {
@@ -687,60 +690,64 @@ function mapRefSectionsToStudent(
   for (let i = 0; i < count; i++) {
     const rStart = refBounds[i]
     const rEnd = refBounds[i + 1]
-    let sStart = mappedStarts[i]
-    let sEndMapped = mappedEnds[i]
+    let sStart = Math.max(0, Math.min(studentActiveDur, mappedStarts[i]))
+    let sEnd = Math.max(0, Math.min(studentActiveDur, mappedEnds[i]))
+    if (sEnd < sStart) {
+      const tmp = sStart
+      sStart = sEnd
+      sEnd = tmp
+    }
 
-    const nextMappedStart =
-      i + 1 < count ? mappedStarts[i + 1] : studentActiveDur
-    // Never spill past the DTW start of the next reference section.
-    const hardCap = Math.max(sStart + minWidth * 0.5, nextMappedStart - gapEps)
+    const nextMappedStart = i + 1 < count ? mappedStarts[i + 1] : studentActiveDur
+    const hardCap = Math.max(sStart + minWidth * 0.5, Math.min(studentActiveDur, nextMappedStart - gapEps))
 
     const refLen = Math.max(0.001, rEnd - rStart)
     const expected = refLen * globalTempo
-    const lo = DUR_CLAMP_LO * expected
-    const hi = DUR_CLAMP_HI * expected
+    let mappedLen = Math.max(0, sEnd - sStart)
 
-    // Anchor at DTW start — do NOT center-expand (that spills into the next phrase).
-    sStart = Math.max(0, Math.min(studentActiveDur, sStart))
-    // Prefer mapped end, but never longer than hi×expected and never past hardCap.
-    let sEnd = Math.min(sEndMapped, sStart + hi, hardCap, studentActiveDur)
-    // If DTW mapped absurdly short, allow up to lo — still capped by hardCap / mapped end.
-    // Prefer ending at mapped boundary rather than expanding to fill gaps.
-    if (sEnd - sStart < Math.min(lo, minWidth * 2)) {
-      sEnd = Math.min(hardCap, studentActiveDur, Math.max(sEnd, Math.min(sEndMapped, sStart + lo)))
-    }
-    if (sEnd < sStart + minWidth) {
-      sEnd = Math.min(hardCap, studentActiveDur, sStart + minWidth)
-    }
-
-    sEnd = snapStudentEndEarlier(
-      studentTimes,
-      studentRms,
-      studentOnsets,
-      sStart,
-      sEnd,
-      hardCap,
-      minWidth,
-    )
-
-    // Final short bias: if still longer than expected*1.05, pull end in (valley already preferred).
-    const softHi = Math.min(hi, expected * 1.05)
-    if (sEnd - sStart > softHi) {
-      const pulled = Math.min(sEnd, sStart + softHi)
+    if (mappedLen > DUR_SHRINK_ABOVE * expected) {
+      // Too long / spill — shrink toward expected, then valley-snap earlier.
+      const shrinkTo = Math.min(sEnd, sStart + expected, hardCap)
       sEnd = snapStudentEndEarlier(
         studentTimes,
         studentRms,
         studentOnsets,
         sStart,
-        pulled,
+        Math.max(shrinkTo, sStart + minWidth),
         hardCap,
         minWidth,
       )
-      // If no better valley, accept the softHi cut.
-      if (sEnd - sStart > softHi) sEnd = Math.min(sEnd, sStart + softHi, hardCap)
+      if (sEnd - sStart > DUR_SHRINK_ABOVE * expected) {
+        sEnd = Math.min(hardCap, sStart + DUR_SHRINK_ABOVE * expected)
+      }
+    } else if (mappedLen < DUR_EXPAND_BELOW * expected) {
+      // Too short (e.g. S3 cut off) — expand toward expected, do NOT valley-snap shorter.
+      const expandTo = Math.min(hardCap, sStart + expected)
+      sEnd = Math.max(sEnd, expandTo)
+      // If hardCap blocks full expected, take as much as we can before next phrase.
+      if (sEnd - sStart < DUR_EXPAND_BELOW * expected) {
+        sEnd = Math.min(hardCap, Math.max(sEnd, sStart + DUR_EXPAND_BELOW * expected))
+      }
+    } else {
+      // In band: keep DTW end, cap before next phrase; mild valley only if slightly long.
+      sEnd = Math.min(sEnd, hardCap)
+      mappedLen = sEnd - sStart
+      if (mappedLen > DUR_MILD_LONG * expected) {
+        const mild = Math.min(sEnd, sStart + expected * DUR_MILD_LONG)
+        sEnd = snapStudentEndEarlier(
+          studentTimes,
+          studentRms,
+          studentOnsets,
+          sStart,
+          mild,
+          hardCap,
+          minWidth,
+        )
+      }
     }
 
-    windows.push({ rStart, rEnd, sStart, sEnd: Math.max(sStart + Math.min(minWidth, 0.08), sEnd) })
+    sEnd = Math.min(hardCap, Math.max(sStart + Math.min(minWidth, 0.08), sEnd))
+    windows.push({ rStart, rEnd, sStart, sEnd })
   }
 
   // Overlap repair: cut the earlier section's end only — never push the later start later.

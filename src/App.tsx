@@ -148,6 +148,13 @@ export default function App() {
 
         <Recorder onSave={handleSaveTake} />
 
+        <PracticeSections
+          pieceId={piece.id}
+          takeId={selectedTake?.id ?? null}
+          youtubeRef={youtubeRef}
+          takeRef={takePlayerRef}
+        />
+
         {!loadError && takes.length === 0 && otherPieceCounts.length > 0 && (
           <div className="recover-hint card" role="status">
             <p className="hint" style={{ marginBottom: '0.5rem' }}>
@@ -182,13 +189,6 @@ export default function App() {
           onUpdateNotes={handleTakeNotes}
         />
         <TakePlayer ref={takePlayerRef} take={selectedTake} />
-
-        <PracticeSections
-          pieceId={piece.id}
-          takeId={selectedTake?.id ?? null}
-          youtubeRef={youtubeRef}
-          takeRef={takePlayerRef}
-        />
 
         <PieceNotes value={notes} onChange={handleNotesChange} />
 

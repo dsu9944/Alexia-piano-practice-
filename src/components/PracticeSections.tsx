@@ -61,9 +61,11 @@ interface SecondsInputProps {
   title?: string
 }
 
+const STEP_SEC = 0.1
+
 /**
- * Keyboard-friendly seconds field: type freely (digits + one decimal), commit on blur.
- * Locked/auto-chained starts stay readOnly as designed.
+ * Typable seconds field plus − / + steppers (0.1s).
+ * Locked/auto-chained starts stay readOnly (no steppers).
  */
 function SecondsInput({
   value,
@@ -94,34 +96,69 @@ function SecondsInput({
     )
   }
 
+  const nudge = (delta: number) => {
+    const base = focused ? parseSecondsDraft(draft, value) : round1(value)
+    const next = round1(Math.max(0, base + delta))
+    setDraft(formatSec(next))
+    if (next !== round1(value)) onCommit(next)
+  }
+
   return (
-    <input
-      type="text"
-      inputMode="decimal"
-      autoComplete="off"
-      value={focused ? draft : formatSec(value)}
-      className={className}
-      title={title}
-      onFocus={(e) => {
-        setFocused(true)
-        setDraft(formatSec(value))
-        e.target.select()
-      }}
-      onChange={(e) => {
-        setDraft(sanitizeSecondsDraft(e.target.value))
-      }}
-      onBlur={() => {
-        const next = parseSecondsDraft(draft, value)
-        setFocused(false)
-        setDraft(formatSec(next))
-        if (next !== round1(value)) onCommit(next)
-      }}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter') {
-          e.currentTarget.blur()
-        }
-      }}
-    />
+    <div className="seconds-input-row">
+      <button
+        type="button"
+        className="btn tiny seconds-step"
+        aria-label="Decrease by 0.1 seconds"
+        title="−0.1s"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => nudge(-STEP_SEC)}
+      >
+        −
+      </button>
+      <input
+        type="text"
+        inputMode="decimal"
+        autoComplete="off"
+        value={focused ? draft : formatSec(value)}
+        className={className}
+        title={title}
+        onFocus={(e) => {
+          setFocused(true)
+          setDraft(formatSec(value))
+          e.target.select()
+        }}
+        onChange={(e) => {
+          setDraft(sanitizeSecondsDraft(e.target.value))
+        }}
+        onBlur={() => {
+          const next = parseSecondsDraft(draft, value)
+          setFocused(false)
+          setDraft(formatSec(next))
+          if (next !== round1(value)) onCommit(next)
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.currentTarget.blur()
+          } else if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            nudge(STEP_SEC)
+          } else if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            nudge(-STEP_SEC)
+          }
+        }}
+      />
+      <button
+        type="button"
+        className="btn tiny seconds-step"
+        aria-label="Increase by 0.1 seconds"
+        title="+0.1s"
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => nudge(STEP_SEC)}
+      >
+        +
+      </button>
+    </div>
   )
 }
 
@@ -493,8 +530,8 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
       <p className="hint">
         YouTube times are saved for this piece (shared). Alexia times are saved for the selected take
         (each recording can differ slightly). Section 1 start is editable; later starts follow the
-        previous end automatically. Type times with the keyboard (e.g. 12.5) and press Enter or click
-        away to save.
+        previous end automatically. Type times (e.g. 12.5) or use − / + to nudge by 0.1s; press Enter
+        or click away to save.
       </p>
 
       {loadError && <p className="error">{loadError}</p>}

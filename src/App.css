@@ -422,6 +422,28 @@ textarea:focus,
   letter-spacing: 0;
 }
 
+
+.seconds-input-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+}
+
+.seconds-input-row input {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+
+.seconds-step {
+  flex: 0 0 auto;
+  min-width: 2rem;
+  padding: 0.35rem 0.45rem;
+  font-weight: 700;
+  line-height: 1;
+  font-size: 1rem;
+}
+
 .input-readonly,
 input.input-readonly {
   background: #f3f1ec;

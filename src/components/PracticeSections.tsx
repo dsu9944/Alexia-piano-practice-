@@ -689,6 +689,7 @@ export function PracticeSections({
     }
     const idx = sections.findIndex((s) => s.id === sectionId)
     if (idx < 0) return
+    // Always read from the full-take / section player — same audio element.
     const t = round1(takeRef.current?.getCurrentTime() ?? 0)
 
     if (which === 'start') {
@@ -697,7 +698,9 @@ export function PracticeSections({
         return
       }
       setAlexiaStartFirst(t)
-      setStatus(`Alexia start marked at ${formatSec(t)}s`)
+      setStatus(
+        `Alexia start marked at ${formatSec(t)}s (from take playback). End defaults to ${formatSec(t + 20)}s until you Mark end.`,
+      )
     } else {
       setAlexiaEnd(sectionId, t)
       if (idx + 1 < sections.length) {
@@ -737,20 +740,34 @@ export function PracticeSections({
     endSec: number,
     fromSec?: number,
   ) => {
-    if (!(endSec > startSec)) {
-      setStatus('Mark Alexia start and end for this section first.')
+    if (!takeId) {
+      setStatus('Select or record a take first.')
+      return
+    }
+    // Ensure a playable window even if times were never marked (caller usually passes defaults).
+    const start = round1(Math.max(0, startSec))
+    const end =
+      Number.isFinite(endSec) && endSec > start + 0.05
+        ? round1(endSec)
+        : round1(start + 20)
+    if (!(end > start)) {
+      setStatus('Could not play this Alexia section.')
+      return
+    }
+    if (!takeRef.current) {
+      setStatus('Take player not ready — select the take, then try Play again.')
       return
     }
     const from =
       fromSec == null
-        ? startSec
-        : round1(Math.min(endSec, Math.max(startSec, fromSec)))
-    void takeRef.current?.playClip(from, endSec)
-    if (from === round1(startSec)) {
-      setStatus(`Playing Alexia: ${label} (${formatSec(startSec)}–${formatSec(endSec)}s)`)
+        ? start
+        : round1(Math.min(end, Math.max(start, fromSec)))
+    void takeRef.current.playClip(from, end)
+    if (from === round1(start)) {
+      setStatus(`Playing Alexia: ${label} (${formatSec(start)}–${formatSec(end)}s)`)
     } else {
       setStatus(
-        `Playing Alexia from ${formatSec(from)}s: ${label} (→${formatSec(endSec)}s)`,
+        `Playing Alexia from ${formatSec(from)}s: ${label} (→${formatSec(end)}s)`,
       )
     }
   }
@@ -810,11 +827,31 @@ export function PracticeSections({
     return alexia[sectionId]?.startSec ?? 0
   }
 
+  /**
+   * Effective Alexia window for UI + Play. Missing end defaults to start+20 so
+   * section Play is usable as soon as a take is selected (no stars required).
+   * Mark start/end still persist real times from the take's currentTime.
+   */
+  const alexiaWindowFor = (index: number, sectionId: string) => {
+    const startSec = round1(Math.max(0, alexiaStartFor(index, sectionId)))
+    const storedEnd = alexia[sectionId]?.endSec
+    const endSec =
+      storedEnd != null && Number.isFinite(storedEnd) && storedEnd > startSec + 0.05
+        ? round1(storedEnd)
+        : round1(startSec + 20)
+    // Show "default +20s" when we invented the end (nothing valid stored yet).
+    const isDefault = !(
+      storedEnd != null && Number.isFinite(storedEnd) && storedEnd > startSec + 0.05
+    )
+    return { startSec, endSec, isDefault }
+  }
+
   return (
     <div className="practice-sections card">
       <h2>Practice sections</h2>
       <p className="compare-tip continuous-tip">
-        YouTube cuts are the piece template. For each new take, only set Alexia’s times.
+        YouTube cuts are the piece template. Select a take, play it below, then Mark Alexia
+        start/end from the take’s current time. Until marked, Alexia Play uses start→+20s.
         Continuous — each section starts where the last ended. Type or use ▲▼ / ↑↓ (±0.1s).
       </p>
 
@@ -844,6 +881,11 @@ export function PracticeSections({
         {!takeId && (
           <span className="hint inline-hint">Select a take to mark Alexia times.</span>
         )}
+        {takeId && (
+          <span className="hint inline-hint">
+            Play the take (below), then Mark start/end — Play uses start→+20s until marked.
+          </span>
+        )}
       </div>
 
       {takeId && (
@@ -862,8 +904,8 @@ export function PracticeSections({
         <ul className="section-edit-list">
           {sections.map((section, index) => {
             const startLocked = index > 0
-            const aStart = alexiaStartFor(index, section.id)
-            const aEnd = alexia[section.id]?.endSec ?? 0
+            const { startSec: aStart, endSec: aEnd, isDefault: aDefault } =
+              alexiaWindowFor(index, section.id)
             return (
               <li key={section.id} className="section-edit-card">
                 <div className="section-edit-top">
@@ -995,9 +1037,17 @@ export function PracticeSections({
                       </label>
                       <label>
                         End
+                        {aDefault && takeId && (
+                          <span className="locked-hint">default +20s</span>
+                        )}
                         <SecondsInput
                           value={aEnd}
                           disabled={!takeId}
+                          title={
+                            aDefault && takeId
+                              ? 'Default window until you Mark end (start → start+20s)'
+                              : undefined
+                          }
                           onCommit={(seconds) => setAlexiaEnd(section.id, seconds)}
                         />
                       </label>

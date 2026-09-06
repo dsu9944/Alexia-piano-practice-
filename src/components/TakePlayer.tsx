@@ -263,7 +263,8 @@ export const TakePlayer = forwardRef<TakePlayerHandle, Props>(function TakePlaye
     <div className="take-player card">
       <h2>Alexia’s take</h2>
       <p className="compare-tip">
-        Play the full take here, or use Practice sections below to mark and compare short clips.
+        Play or scrub the full take here, then use Mark Alexia start/end in Practice sections
+        (above) — marks use this player’s current time.
       </p>
       {!take ? (
         <p className="hint">Select a saved take below (or record a new one).</p>

@@ -74,12 +74,15 @@ export default function App() {
     }
   }, [])
 
-  const refreshTakes = useCallback(async (pieceId: string) => {
+  const refreshTakes = useCallback(async (pieceId: string, preferTakeId?: string) => {
     try {
       setLoadError(null)
       const list = await getTakesForPiece(pieceId)
       setTakes(list)
       setSelectedTake((prev) => {
+        if (preferTakeId) {
+          return list.find((t) => t.id === preferTakeId) ?? list[0] ?? null
+        }
         if (!prev) return list[0] ?? null
         return list.find((t) => t.id === prev.id) ?? list[0] ?? null
       })
@@ -126,7 +129,8 @@ export default function App() {
       notes: '',
     }
     await saveTake(take)
-    await refreshTakes(piece.id)
+    // Auto-select the new take so Practice sections Alexia controls + takeRef wire immediately.
+    await refreshTakes(piece.id, take.id)
     setSelectedTake(take)
   }
 

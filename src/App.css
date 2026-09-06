@@ -33,24 +33,6 @@
   opacity: 0.92;
 }
 
-.layout {
-  display: grid;
-  grid-template-columns: minmax(220px, 280px) 1fr;
-  gap: 1.25rem;
-  align-items: start;
-}
-
-@media (max-width: 840px) {
-  .layout {
-    grid-template-columns: 1fr;
-  }
-}
-
-.sidebar {
-  position: sticky;
-  top: 0.75rem;
-}
-
 .piece-picker,
 .card,
 .youtube-wrap {
@@ -62,7 +44,14 @@
   margin-bottom: 1rem;
 }
 
-.piece-picker h2,
+.piece-select-label {
+  display: block;
+  margin: 0 0 0.35rem;
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #1e2935;
+}
+
 .card h2,
 .youtube-wrap h2,
 .piece-heading h2 {
@@ -71,71 +60,36 @@
 }
 
 .hint {
-  margin: 0 0 0.9rem;
+  margin: 0 0 0.75rem;
   color: #667085;
   font-size: 0.92rem;
 }
 
-.piece-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  max-height: min(70vh, 640px);
-  overflow: auto;
-}
-
-.piece-btn {
+.piece-select {
+  display: block;
   width: 100%;
-  display: flex;
-  gap: 0.65rem;
-  align-items: flex-start;
-  text-align: left;
-  border: 1px solid transparent;
-  background: #f7f3ec;
+  max-width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d9d1c4;
   border-radius: 12px;
-  padding: 0.55rem 0.65rem;
+  padding: 0.7rem 0.85rem;
+  background: #fff;
+  color: #1e2935;
+  font-size: 1rem;
+  font-weight: 500;
   cursor: pointer;
-  color: inherit;
-  transition: background 0.15s, border-color 0.15s;
+  appearance: auto;
 }
 
-.piece-btn:hover { background: #efe8dc; }
-
-.piece-btn.active {
-  background: #e7f0ee;
-  border-color: #7aa39a;
+.piece-select:focus {
+  outline: 2px solid #7aa39a;
+  outline-offset: 1px;
 }
 
-.piece-num {
-  flex: 0 0 1.5rem;
-  height: 1.5rem;
-  border-radius: 999px;
-  background: #d9e6e2;
-  color: #2f4f4a;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.75rem;
-  font-weight: 600;
+.main {
+  position: relative;
+  z-index: 0;
 }
-
-.piece-btn.active .piece-num {
-  background: #3d6b7a;
-  color: #fff;
-}
-
-.piece-text {
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-  min-width: 0;
-}
-
-.piece-title { font-weight: 600; font-size: 0.92rem; }
-.piece-composer { font-size: 0.78rem; color: #7a8494; }
 
 .piece-heading { margin-bottom: 0.75rem; }
 .piece-heading h2 { font-size: 1.45rem; margin: 0; }

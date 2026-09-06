@@ -109,34 +109,30 @@ export default function App() {
 
       {loadError && <p className="error banner-error">{loadError}</p>}
 
-      <div className="layout">
-        <aside className="sidebar">
-          <PiecePicker selectedId={piece.id} onSelect={handleSelectPiece} />
-        </aside>
+      <PiecePicker selectedId={piece.id} onSelect={handleSelectPiece} />
 
-        <main className="main">
-          <div className="piece-heading">
-            <h2>{piece.title}</h2>
-            {piece.composer && <p className="composer">{piece.composer}</p>}
-          </div>
+      <main className="main">
+        <div className="piece-heading">
+          <h2>{piece.title}</h2>
+          {piece.composer && <p className="composer">{piece.composer}</p>}
+        </div>
 
-          <YouTubePlayer youtubeId={piece.youtubeId} title={piece.title} />
-          <Recorder onSave={handleSaveTake} />
-          <TakesList
-            takes={takes}
-            selectedId={selectedTake?.id ?? null}
-            onSelect={setSelectedTake}
-            onDelete={handleDelete}
-            onUpdateNotes={handleTakeNotes}
-          />
-          <ComparisonView
-            key={selectedTake?.id ?? 'none'}
-            take={selectedTake}
-            onAnalyzed={handleAnalyzed}
-          />
-          <PieceNotes value={notes} onChange={handleNotesChange} />
-        </main>
-      </div>
+        <YouTubePlayer youtubeId={piece.youtubeId} title={piece.title} />
+        <Recorder onSave={handleSaveTake} />
+        <TakesList
+          takes={takes}
+          selectedId={selectedTake?.id ?? null}
+          onSelect={setSelectedTake}
+          onDelete={handleDelete}
+          onUpdateNotes={handleTakeNotes}
+        />
+        <ComparisonView
+          key={selectedTake?.id ?? 'none'}
+          take={selectedTake}
+          onAnalyzed={handleAnalyzed}
+        />
+        <PieceNotes value={notes} onChange={handleNotesChange} />
+      </main>
 
       <footer className="footer">
         <p>

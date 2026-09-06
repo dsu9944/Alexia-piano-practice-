@@ -52,3 +52,20 @@ export interface PieceNotes {
   text: string
   updatedAt: number
 }
+
+/** Durable reference phrase cuts for a piece + reference file. */
+export interface PieceSectionMap {
+  id: string
+  pieceId: string
+  /** Stable key: name|size|type of the reference file. */
+  refKey: string
+  refFileName?: string
+  refSize: number
+  /**
+   * Boundary times on the silence-trimmed reference timeline
+   * (length = sectionCount + 1, includes 0 and activeDuration).
+   */
+  boundsActive: number[]
+  activeDurationSec: number
+  updatedAt: number
+}

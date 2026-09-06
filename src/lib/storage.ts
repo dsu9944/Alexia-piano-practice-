@@ -1,11 +1,12 @@
-import type { AnalysisResult, PieceNotes, Take } from '../types'
+import type { AnalysisResult, PieceNotes, PieceSectionMap, Take } from '../types'
 import { reviveAudioBlob } from './audioMime'
 
 const DB_NAME = 'alexia-piano-practice'
-/** v1 stores; optional referenceBlob/referenceFileName added without a version bump (graceful). */
-const DB_VERSION = 1
+/** v2: pieceSectionMap for durable reference phrase cuts. */
+const DB_VERSION = 2
 const TAKES_STORE = 'takes'
 const NOTES_STORE = 'notes'
+const SECTION_MAP_STORE = 'pieceSectionMap'
 const META_KEY = 'alexia-piano-meta'
 
 interface TakeRecord {
@@ -36,7 +37,79 @@ function openDb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(NOTES_STORE)) {
         db.createObjectStore(NOTES_STORE, { keyPath: 'pieceId' })
       }
+      if (!db.objectStoreNames.contains(SECTION_MAP_STORE)) {
+        const store = db.createObjectStore(SECTION_MAP_STORE, { keyPath: 'id' })
+        store.createIndex('pieceId', 'pieceId', { unique: false })
+      }
     }
+  })
+}
+
+/** Key for matching the same reference file across practice sessions. */
+export function referenceFileKey(fileName: string | undefined, blob: Blob): string {
+  const name = (fileName || 'reference').trim().toLowerCase()
+  const type = (blob.type || '').split(';')[0].trim().toLowerCase()
+  return `${name}|${blob.size}|${type}`
+}
+
+export function sectionMapId(pieceId: string, refKey: string): string {
+  return `${pieceId}::${refKey}`
+}
+
+export async function getPieceSectionMap(
+  pieceId: string,
+  refKey: string,
+): Promise<PieceSectionMap | null> {
+  const db = await openDb()
+  const id = sectionMapId(pieceId, refKey)
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SECTION_MAP_STORE, 'readonly')
+    const req = tx.objectStore(SECTION_MAP_STORE).get(id)
+    req.onsuccess = () => resolve((req.result as PieceSectionMap) ?? null)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+export async function savePieceSectionMap(map: PieceSectionMap): Promise<void> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SECTION_MAP_STORE, 'readwrite')
+    tx.objectStore(SECTION_MAP_STORE).put(map)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+}
+
+export async function deletePieceSectionMap(pieceId: string, refKey: string): Promise<void> {
+  const db = await openDb()
+  const id = sectionMapId(pieceId, refKey)
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SECTION_MAP_STORE, 'readwrite')
+    tx.objectStore(SECTION_MAP_STORE).delete(id)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+}
+
+/** Any saved section map for this piece (newest by updatedAt). */
+export async function getLatestSectionMapForPiece(
+  pieceId: string,
+): Promise<PieceSectionMap | null> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(SECTION_MAP_STORE, 'readonly')
+    const index = tx.objectStore(SECTION_MAP_STORE).index('pieceId')
+    const req = index.getAll(pieceId)
+    req.onsuccess = () => {
+      const rows = (req.result as PieceSectionMap[]) || []
+      if (rows.length === 0) {
+        resolve(null)
+        return
+      }
+      rows.sort((a, b) => b.updatedAt - a.updatedAt)
+      resolve(rows[0])
+    }
+    req.onerror = () => reject(req.error)
   })
 }
 

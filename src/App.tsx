@@ -206,6 +206,7 @@ export default function App() {
         <ComparisonView
           key={selectedTake?.id ?? 'none'}
           take={selectedTake}
+          pieceId={piece.id}
           onAnalyzed={handleAnalyzed}
         />
         <PieceNotes value={notes} onChange={handleNotesChange} />

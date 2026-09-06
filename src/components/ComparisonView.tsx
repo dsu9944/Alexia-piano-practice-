@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import { analyzeComparison, analyzeSolo, AudioDecodeError } from '../lib/audioAnalysis'
 import { reviveAudioBlob } from '../lib/audioMime'
+import {
+  deletePieceSectionMap,
+  getPieceSectionMap,
+  referenceFileKey,
+  savePieceSectionMap,
+  sectionMapId,
+} from '../lib/storage'
 import type { AnalysisResult, SectionAnalysis, SectionScore, Take } from '../types'
 
 export type AnalyzedPayload = {
@@ -11,6 +18,7 @@ export type AnalyzedPayload = {
 
 interface Props {
   take: Take | null
+  pieceId: string
   onAnalyzed: (takeId: string, payload: AnalyzedPayload) => void
 }
 
@@ -29,7 +37,7 @@ function formatRange(start: number, end: number): string {
   return `${start.toFixed(1)}–${end.toFixed(1)}s`
 }
 
-export function ComparisonView({ take, onAnalyzed }: Props) {
+export function ComparisonView({ take, pieceId, onAnalyzed }: Props) {
   const [refBlob, setRefBlob] = useState<Blob | null>(take?.referenceBlob ?? null)
   const [refFileName, setRefFileName] = useState<string | null>(take?.referenceFileName ?? null)
   const [busy, setBusy] = useState(false)
@@ -38,6 +46,8 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
   const [alexiaUrl, setAlexiaUrl] = useState<string | null>(null)
   const [refUrl, setRefUrl] = useState<string | null>(null)
   const [playing, setPlaying] = useState<PlayingClip>(null)
+  const [boundsSource, setBoundsSource] = useState<'saved' | 'computed' | null>(null)
+  const [hasSavedCuts, setHasSavedCuts] = useState(false)
 
   const alexiaAudioRef = useRef<HTMLAudioElement | null>(null)
   const refAudioRef = useRef<HTMLAudioElement | null>(null)
@@ -47,6 +57,17 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
   /** Bumped on stop to cancel a Play-both chain mid-flight. */
   const chainTokenRef = useRef(0)
   const endResolverRef = useRef<((completed: boolean) => void) | null>(null)
+
+  useEffect(() => {
+    if (!refBlob) {
+      setHasSavedCuts(false)
+      return
+    }
+    const key = referenceFileKey(refFileName ?? undefined, refBlob)
+    void getPieceSectionMap(pieceId, key)
+      .then((m) => setHasSavedCuts(Boolean(m)))
+      .catch(() => setHasSavedCuts(false))
+  }, [pieceId, refBlob, refFileName])
 
   // Rebuild object URL only when the take audio identity changes — not when
   // analysis/reference metadata updates after Compare (avoids Safari “Error”).
@@ -253,40 +274,96 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
     if (chainTokenRef.current === token && okRef) setPlaying(null)
   }
 
-  const runAnalysis = async (mode: 'solo' | 'comparison') => {
-    if (!take) return
+  const runComparison = async (forceRecomputeBounds: boolean) => {
+    if (!take || !refBlob) {
+      setError('Choose a reference audio file you own (CD rip / mp3 / Voice Memo) first.')
+      return
+    }
     stopPlayback()
     setError(null)
     setBusy(true)
     try {
-      let analysis: AnalysisResult
-      if (mode === 'comparison') {
-        if (!refBlob) {
-          setError('Choose a reference audio file you own (CD rip / mp3 / Voice Memo) first.')
-          setBusy(false)
-          return
+      const student = await reviveAudioBlob(take.blob)
+      const reference = await reviveAudioBlob(refBlob, refBlob.type || undefined)
+      const refKey = referenceFileKey(refFileName ?? undefined, reference)
+
+      let savedBoundsActive: number[] | undefined
+      let savedActiveDurationSec: number | undefined
+      if (!forceRecomputeBounds) {
+        const saved = await getPieceSectionMap(pieceId, refKey)
+        if (saved?.boundsActive?.length) {
+          savedBoundsActive = saved.boundsActive
+          savedActiveDurationSec = saved.activeDurationSec
         }
-        // Revive blobs before decode — helps Safari after IndexedDB restore.
-        const student = await reviveAudioBlob(take.blob)
-        const reference = await reviveAudioBlob(
-          refBlob,
-          refBlob.type || undefined,
-        )
-        analysis = await analyzeComparison(student, reference, {
-          referenceFileName: refFileName ?? undefined,
-        })
-        setResult(analysis)
-        // Keep in-memory analysis even if IDB persist of reference later fails.
-        onAnalyzed(take.id, {
-          result: analysis,
-          reference: { blob: reference, fileName: refFileName ?? undefined },
-        })
       } else {
-        const student = await reviveAudioBlob(take.blob)
-        analysis = await analyzeSolo(student)
-        setResult(analysis)
-        onAnalyzed(take.id, { result: analysis })
+        try {
+          await deletePieceSectionMap(pieceId, refKey)
+        } catch {
+          // ignore
+        }
       }
+
+      const outcome = await analyzeComparison(student, reference, {
+        referenceFileName: refFileName ?? undefined,
+        savedBoundsActive,
+        savedActiveDurationSec,
+        forceRecomputeBounds,
+      })
+
+      setResult(outcome.result)
+      setBoundsSource(outcome.boundsSource)
+
+      try {
+        await savePieceSectionMap({
+          id: sectionMapId(pieceId, refKey),
+          pieceId,
+          refKey,
+          refFileName: refFileName ?? undefined,
+          refSize: reference.size,
+          boundsActive: outcome.boundsActive,
+          activeDurationSec: outcome.activeDurationSec,
+          updatedAt: Date.now(),
+        })
+        setHasSavedCuts(true)
+      } catch (err) {
+        console.warn('Could not persist section cuts (analysis still shown):', err)
+      }
+
+      onAnalyzed(take.id, {
+        result: outcome.result,
+        reference: { blob: reference, fileName: refFileName ?? undefined },
+      })
+    } catch (err) {
+      console.error(err)
+      if (err instanceof AudioDecodeError) {
+        setError(err.message)
+      } else if (err instanceof Error && err.message) {
+        setError(`Analysis failed: ${err.message}`)
+      } else {
+        setError(
+          'Analysis failed. Try a .m4a / .wav / .mp3 reference, or Download the take and re-import.',
+        )
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const runAnalysis = async (mode: 'solo' | 'comparison') => {
+    if (!take) return
+    if (mode === 'comparison') {
+      await runComparison(false)
+      return
+    }
+    stopPlayback()
+    setError(null)
+    setBusy(true)
+    setBoundsSource(null)
+    try {
+      const student = await reviveAudioBlob(take.blob)
+      const analysis = await analyzeSolo(student)
+      setResult(analysis)
+      onAnalyzed(take.id, { result: analysis })
     } catch (err) {
       console.error(err)
       if (err instanceof AudioDecodeError) {
@@ -320,8 +397,9 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
     <div className="comparison card">
       <h2>Practice hone</h2>
       <p className="hint">
-        YouTube audio cannot be fetched in the browser (CORS). For a true “vs model” compare, upload a
-        reference file you already own. Without it, we still check consistency inside Alexia’s take.
+        YouTube audio cannot be fetched in the browser (CORS). Upload a reference you own (CD / mp3 /
+        Voice Memo). Section cuts are saved per piece so new takes reuse the same phrases — only
+        Alexia’s windows are remapped. Use Reset section cuts rarely if a cut feels wrong.
       </p>
 
       <audio ref={alexiaAudioRef} src={alexiaUrl ?? undefined} preload="metadata" />
@@ -375,11 +453,29 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
           type="button"
           className="btn secondary"
           disabled={busy || !refBlob}
-          onClick={() => runAnalysis('comparison')}
+          onClick={() => void runComparison(false)}
         >
           Compare to reference
         </button>
+        <button
+          type="button"
+          className="btn ghost"
+          disabled={busy || !refBlob}
+          title="Recompute phrase cuts from the reference (rare)"
+          onClick={() => void runComparison(true)}
+        >
+          Reset section cuts
+        </button>
       </div>
+
+      {hasSavedCuts && (
+        <p className="hint cuts-hint">
+          Saved section cuts for this piece{refFileName ? ` · ${refFileName}` : ''}. New takes reuse
+          these phrases.
+          {boundsSource === 'saved' ? ' Last compare used the saved cuts.' : ''}
+          {boundsSource === 'computed' ? ' Last compare recomputed cuts and saved them.' : ''}
+        </p>
+      )}
 
       {error && <p className="error">{error}</p>}
 

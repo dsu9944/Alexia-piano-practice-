@@ -9,9 +9,9 @@ const DTW_POINTS = 176
 const SILENCE_REL = 0.02
 const SILENCE_ABS = 0.0015
 const SILENCE_PAD_SEC = 0.12
-/** Clamp mapped section length vs expected (refLen * globalTempo). */
-const DUR_CLAMP_LO = 0.55
-const DUR_CLAMP_HI = 1.8
+/** Clamp mapped section length vs expected (refLen * globalTempo). Prefer short. */
+const DUR_CLAMP_LO = 0.5
+const DUR_CLAMP_HI = 1.15
 
 /** Guess mime from filename (Voice Memos are often .m4a with empty type). */
 function guessMimeFromName(name?: string): string | undefined {
@@ -415,9 +415,33 @@ function mapRefTimeToStudent(
 }
 
 /**
+ * Walk left from a valley/lull frame to the *start* of that lull so the previous
+ * section ends before the next phrase’s attack (prefer early cuts over late spill).
+ */
+function startOfLullIndex(
+  smoothRms: Float32Array,
+  smoothOnsets: Float32Array,
+  meanRms: number,
+  meanOnset: number,
+  idx: number,
+): number {
+  let i = idx
+  while (i > 1) {
+    const prev = i - 1
+    const stillQuiet =
+      (meanRms <= 1e-9 || smoothRms[prev] <= meanRms * 0.92) &&
+      (meanOnset <= 1e-9 || smoothOnsets[prev] <= meanOnset * 0.7)
+    const rising = smoothRms[prev] < smoothRms[i] * 0.85 && smoothOnsets[i] > meanOnset * 0.8
+    if (!stillQuiet || rising) break
+    i = prev
+  }
+  return i
+}
+
+/**
  * Define phrase-like section boundaries on the REFERENCE timeline.
- * Prefer energy valleys / onset lulls; fall back to equal cumulative-onset quantiles
- * so sections follow musical activity rather than wall-clock alone.
+ * Prefer energy valleys / onset lulls; place the cut at the *start* of the lull
+ * (slightly early) so section N doesn’t spill ~0.5–1s into section N+1.
  * Returns sorted boundary times including 0 and duration (length = count + 1).
  */
 function referenceSectionBoundaries(
@@ -450,7 +474,10 @@ function referenceSectionBoundaries(
     if (!isValley && !onsetLull) continue
     const depth = meanRms > 1e-9 ? 1 - smoothRms[i] / meanRms : 0
     const lull = meanOnset > 1e-9 ? 1 - smoothOnsets[i] / Math.max(meanOnset, 1e-9) : 0
-    candidates.push({ t, score: depth * 0.6 + lull * 0.4 })
+    const startIdx = startOfLullIndex(smoothRms, smoothOnsets, meanRms, meanOnset, i)
+    const tCut = times[startIdx]
+    if (tCut < minGap || tCut > duration - minGap) continue
+    candidates.push({ t: tCut, score: depth * 0.6 + lull * 0.4 })
   }
 
   candidates.sort((a, b) => b.score - a.score)
@@ -470,8 +497,33 @@ function referenceSectionBoundaries(
     interiors = cumulativeOnsetBoundaries(times, onsets, duration, count - 1)
   }
 
-  const bounds = [0, ...interiors, duration]
+  // Extra early bias (~0.45s): previous section must not eat the next attack.
+  const EARLY_PULL_SEC = 0.45
   const minWidth = Math.max(0.35, duration / (count * 4))
+  const pulled: number[] = []
+  for (let idx = 0; idx < interiors.length; idx++) {
+    const floor = (idx === 0 ? 0 : pulled[idx - 1]) + minWidth
+    const raw = interiors[idx]
+    const earlyTarget = raw - EARLY_PULL_SEC
+    let best = earlyTarget
+    let bestDist = Infinity
+    for (let i = 1; i < times.length - 1; i++) {
+      const t = times[i]
+      if (t < earlyTarget - 0.2 || t > raw) continue
+      const quiet =
+        (meanRms <= 1e-9 || smoothRms[i] <= meanRms * 0.9) &&
+        (meanOnset <= 1e-9 || smoothOnsets[i] <= meanOnset * 0.65)
+      if (!quiet) continue
+      const d = Math.abs(t - earlyTarget)
+      if (d < bestDist) {
+        bestDist = d
+        best = t
+      }
+    }
+    pulled.push(Math.max(floor, Math.min(best, raw)))
+  }
+
+  const bounds = [0, ...pulled, duration]
   for (let i = 1; i < bounds.length; i++) {
     if (bounds[i] < bounds[i - 1] + minWidth) {
       bounds[i] = Math.min(duration, bounds[i - 1] + minWidth)
@@ -533,10 +585,72 @@ function cumulativeOnsetBoundaries(
 }
 
 /**
+ * Pull Alexia's section end earlier to a nearby energy valley / onset lull
+ * so playback does not spill into the next phrase. Prefers shorter windows.
+ */
+function snapStudentEndEarlier(
+  times: Float32Array,
+  rms: Float32Array,
+  onsets: Float32Array,
+  sStart: number,
+  sEnd: number,
+  hardCap: number,
+  minWidth: number,
+): number {
+  const cap = Math.min(sEnd, hardCap)
+  const earliest = sStart + minWidth
+  if (cap <= earliest + 0.02) {
+    return Math.max(sStart + Math.min(minWidth, 0.08), Math.min(cap, hardCap))
+  }
+
+  const smoothRms = smoothEnvelope(rms, 3)
+  const smoothOnsets = smoothEnvelope(onsets, 2)
+  let sumR = 0
+  let sumO = 0
+  let n = 0
+  for (let i = 0; i < times.length; i++) {
+    const t = times[i]
+    if (t < earliest || t > cap) continue
+    sumR += smoothRms[i]
+    sumO += smoothOnsets[i]
+    n++
+  }
+  const meanRms = n > 0 ? sumR / n : 0
+  const meanOnset = n > 0 ? sumO / n : 0
+
+  let bestT = cap
+  let bestScore = -1
+  const span = Math.max(1e-6, cap - earliest)
+
+  for (let i = 1; i < times.length - 1; i++) {
+    const t = times[i]
+    if (t < earliest || t > cap) continue
+    const isValley =
+      smoothRms[i] <= smoothRms[i - 1] &&
+      smoothRms[i] <= smoothRms[i + 1] &&
+      (meanRms <= 1e-9 || smoothRms[i] <= meanRms * 0.9)
+    const onsetLull = meanOnset <= 1e-9 || smoothOnsets[i] <= meanOnset * 0.6
+    if (!isValley && !onsetLull) continue
+
+    const depth = meanRms > 1e-9 ? 1 - smoothRms[i] / meanRms : 0.5
+    const lull = meanOnset > 1e-9 ? 1 - smoothOnsets[i] / meanOnset : 0.5
+    // Bias toward earlier cut (shorter Alexia window) while still rewarding clear valleys.
+    const shortBias = (cap - t) / span
+    const score = depth * 0.45 + lull * 0.25 + shortBias * 0.5
+    if (score > bestScore) {
+      bestScore = score
+      bestT = t
+    }
+  }
+
+  return Math.min(bestT, hardCap)
+}
+
+/**
  * Map each reference section to Alexia's timeline via DTW.
- * Uses mapped windows directly — does NOT redistribute to cover the full take.
- * Clamps each window length to [0.55, 1.8] × (refLen * globalTempo), centered on
- * the DTW midpoint. Only light overlap repair (split at midpoint); gaps OK.
+ * Prefers SHORTER Alexia windows (clamp ~[0.5, 1.2]× expected), anchors at the
+ * DTW start (does not center-expand), snaps end earlier to a valley, and never
+ * extends past the DTW-mapped start of the next section. Overlaps: cut earlier end only.
  */
 function mapRefSectionsToStudent(
   refBounds: number[],
@@ -545,57 +659,97 @@ function mapRefSectionsToStudent(
   studentActiveDur: number,
   nRef: number,
   nStudent: number,
+  studentTimes: Float32Array,
+  studentRms: Float32Array,
+  studentOnsets: Float32Array,
 ): { rStart: number; rEnd: number; sStart: number; sEnd: number }[] {
   const count = refBounds.length - 1
   const globalTempo = studentActiveDur / Math.max(1e-6, refActiveDur)
   const minWidth = Math.max(0.12, studentActiveDur / (count * 12))
+  const gapEps = 0.02
 
-  const windows: { rStart: number; rEnd: number; sStart: number; sEnd: number }[] = []
+  // Precompute DTW-mapped starts so each section can hard-cap before the next.
+  const mappedStarts: number[] = []
+  const mappedEnds: number[] = []
   for (let i = 0; i < count; i++) {
-    const rStart = refBounds[i]
-    const rEnd = refBounds[i + 1]
-    let sStart = mapRefTimeToStudent(rStart, path, refActiveDur, studentActiveDur, nRef, nStudent)
-    let sEnd = mapRefTimeToStudent(rEnd, path, refActiveDur, studentActiveDur, nRef, nStudent)
+    let sStart = mapRefTimeToStudent(refBounds[i], path, refActiveDur, studentActiveDur, nRef, nStudent)
+    let sEnd = mapRefTimeToStudent(refBounds[i + 1], path, refActiveDur, studentActiveDur, nRef, nStudent)
     if (sEnd < sStart) {
       const tmp = sStart
       sStart = sEnd
       sEnd = tmp
     }
+    mappedStarts.push(sStart)
+    mappedEnds.push(sEnd)
+  }
+
+  const windows: { rStart: number; rEnd: number; sStart: number; sEnd: number }[] = []
+  for (let i = 0; i < count; i++) {
+    const rStart = refBounds[i]
+    const rEnd = refBounds[i + 1]
+    let sStart = mappedStarts[i]
+    let sEndMapped = mappedEnds[i]
+
+    const nextMappedStart =
+      i + 1 < count ? mappedStarts[i + 1] : studentActiveDur
+    // Never spill past the DTW start of the next reference section.
+    const hardCap = Math.max(sStart + minWidth * 0.5, nextMappedStart - gapEps)
 
     const refLen = Math.max(0.001, rEnd - rStart)
     const expected = refLen * globalTempo
-    const mappedLen = Math.max(0, sEnd - sStart)
     const lo = DUR_CLAMP_LO * expected
     const hi = DUR_CLAMP_HI * expected
-    const mid = (sStart + sEnd) / 2
-    const clampedLen = Math.max(lo, Math.min(hi, mappedLen || expected))
-    sStart = mid - clampedLen / 2
-    sEnd = mid + clampedLen / 2
 
+    // Anchor at DTW start — do NOT center-expand (that spills into the next phrase).
     sStart = Math.max(0, Math.min(studentActiveDur, sStart))
-    sEnd = Math.max(0, Math.min(studentActiveDur, sEnd))
-    if (sEnd - sStart < minWidth) {
-      const grow = minWidth - (sEnd - sStart)
-      sStart = Math.max(0, sStart - grow / 2)
-      sEnd = Math.min(studentActiveDur, sStart + minWidth)
-      sStart = Math.max(0, sEnd - minWidth)
+    // Prefer mapped end, but never longer than hi×expected and never past hardCap.
+    let sEnd = Math.min(sEndMapped, sStart + hi, hardCap, studentActiveDur)
+    // If DTW mapped absurdly short, allow up to lo — still capped by hardCap / mapped end.
+    // Prefer ending at mapped boundary rather than expanding to fill gaps.
+    if (sEnd - sStart < Math.min(lo, minWidth * 2)) {
+      sEnd = Math.min(hardCap, studentActiveDur, Math.max(sEnd, Math.min(sEndMapped, sStart + lo)))
+    }
+    if (sEnd < sStart + minWidth) {
+      sEnd = Math.min(hardCap, studentActiveDur, sStart + minWidth)
     }
 
-    windows.push({ rStart, rEnd, sStart, sEnd })
+    sEnd = snapStudentEndEarlier(
+      studentTimes,
+      studentRms,
+      studentOnsets,
+      sStart,
+      sEnd,
+      hardCap,
+      minWidth,
+    )
+
+    // Final short bias: if still longer than expected*1.05, pull end in (valley already preferred).
+    const softHi = Math.min(hi, expected * 1.05)
+    if (sEnd - sStart > softHi) {
+      const pulled = Math.min(sEnd, sStart + softHi)
+      sEnd = snapStudentEndEarlier(
+        studentTimes,
+        studentRms,
+        studentOnsets,
+        sStart,
+        pulled,
+        hardCap,
+        minWidth,
+      )
+      // If no better valley, accept the softHi cut.
+      if (sEnd - sStart > softHi) sEnd = Math.min(sEnd, sStart + softHi, hardCap)
+    }
+
+    windows.push({ rStart, rEnd, sStart, sEnd: Math.max(sStart + Math.min(minWidth, 0.08), sEnd) })
   }
 
-  // Light overlap fix only: split conflicting bounds at midpoint. Gaps stay.
+  // Overlap repair: cut the earlier section's end only — never push the later start later.
   for (let i = 0; i < windows.length - 1; i++) {
-    if (windows[i].sEnd > windows[i + 1].sStart) {
-      const mid = 0.5 * (windows[i].sEnd + windows[i + 1].sStart)
-      windows[i].sEnd = mid
-      windows[i + 1].sStart = mid
-    }
-  }
-
-  for (const w of windows) {
-    if (w.sEnd < w.sStart + minWidth) {
-      w.sEnd = Math.min(studentActiveDur, w.sStart + minWidth)
+    if (windows[i].sEnd > windows[i + 1].sStart - gapEps) {
+      windows[i].sEnd = Math.max(
+        windows[i].sStart + Math.min(minWidth, 0.08),
+        windows[i + 1].sStart - gapEps,
+      )
     }
   }
 
@@ -654,11 +808,45 @@ export async function analyzeSolo(studentBlob: Blob): Promise<AnalysisResult> {
   }
 }
 
+export type ComparisonOutcome = {
+  result: AnalysisResult
+  /** Silence-trimmed reference boundaries (persist these for durable cuts). */
+  boundsActive: number[]
+  activeDurationSec: number
+  boundsSource: 'saved' | 'computed'
+}
+
+function adaptSavedBounds(
+  saved: number[],
+  savedDur: number,
+  currentDur: number,
+  count: number,
+): number[] | null {
+  if (!saved || saved.length !== count + 1) return null
+  if (!(savedDur > 0) || !(currentDur > 0)) return null
+  const scale = currentDur / savedDur
+  const out = saved.map((t) => Math.max(0, Math.min(currentDur, t * scale)))
+  out[0] = 0
+  out[out.length - 1] = currentDur
+  for (let i = 1; i < out.length; i++) {
+    if (out[i] < out[i - 1] + 0.05) out[i] = Math.min(currentDur, out[i - 1] + 0.05)
+  }
+  out[out.length - 1] = currentDur
+  return out
+}
+
 export async function analyzeComparison(
   studentBlob: Blob,
   referenceBlob: Blob,
-  opts?: { referenceFileName?: string },
-): Promise<AnalysisResult> {
+  opts?: {
+    referenceFileName?: string
+    /** Reuse durable phrase cuts (silence-trimmed). */
+    savedBoundsActive?: number[]
+    savedActiveDurationSec?: number
+    /** Ignore saved bounds and recompute valleys. */
+    forceRecomputeBounds?: boolean
+  },
+): Promise<ComparisonOutcome> {
   // Decode separately so Safari failures name take vs reference clearly.
   let studentBuf: AudioBuffer
   try {
@@ -707,15 +895,46 @@ export async function analyzeComparison(
   const sFullOnsets = onsetStrength(sFullEnv.rms)
   const rFullOnsets = onsetStrength(rFullEnv.rms)
 
-  // 1) Sections from the REFERENCE active region (phrase valleys / onset-energy).
-  const refBoundsActive = referenceSectionBoundaries(rEnv.times, rEnv.rms, rOnsets, refActiveDur, count)
+  // 1) Reference phrase cuts — reuse saved map when present (durable UX).
+  let boundsSource: 'saved' | 'computed' = 'computed'
+  let refBoundsActive: number[]
+  if (
+    !opts?.forceRecomputeBounds &&
+    opts?.savedBoundsActive &&
+    opts.savedBoundsActive.length === count + 1
+  ) {
+    const adapted = adaptSavedBounds(
+      opts.savedBoundsActive,
+      opts.savedActiveDurationSec ?? opts.savedBoundsActive[opts.savedBoundsActive.length - 1],
+      refActiveDur,
+      count,
+    )
+    if (adapted) {
+      refBoundsActive = adapted
+      boundsSource = 'saved'
+    } else {
+      refBoundsActive = referenceSectionBoundaries(rEnv.times, rEnv.rms, rOnsets, refActiveDur, count)
+    }
+  } else {
+    refBoundsActive = referenceSectionBoundaries(rEnv.times, rEnv.rms, rOnsets, refActiveDur, count)
+  }
 
   // 2) DTW-align on silence-trimmed onset/energy features.
   const n = DTW_POINTS
   const sFeat = alignmentFeature(sEnv.rms, sOnsets, n)
   const rFeat = alignmentFeature(rEnv.rms, rOnsets, n)
   const path = dtwPath(sFeat, rFeat) // [studentFrame, refFrame]
-  const windowsActive = mapRefSectionsToStudent(refBoundsActive, path, refActiveDur, studentActiveDur, n, n)
+  const windowsActive = mapRefSectionsToStudent(
+    refBoundsActive,
+    path,
+    refActiveDur,
+    studentActiveDur,
+    n,
+    n,
+    sEnv.times,
+    sEnv.rms,
+    sOnsets,
+  )
 
   const sections: SectionAnalysis[] = []
   for (let i = 0; i < count; i++) {
@@ -769,16 +988,26 @@ export async function analyzeComparison(
       ? ` Note: active take length differs from reference by ${Math.round(activeDurDiff * 100)}% — section windows follow DTW (clamped), not full-file padding.`
       : ''
 
+  const savedNote =
+    boundsSource === 'saved'
+      ? ' Using your saved section cuts for this piece — only Alexia’s windows were remapped.'
+      : ' Section cuts were computed from this reference and can be reused on the next take.'
+
   const summary =
     hone.length === 0
-      ? `Nice work — sections look close to your reference (tempo proxy + volume). Sections are defined on the reference, then DTW-aligned to Alexia’s take (silence-trimmed).${durNote}`
-      : `Hone these sections: ${hone.join(', ')}. Sections follow the reference performance (phrase/energy boundaries); Alexia’s windows are DTW-aligned (silence-trimmed, duration-clamped) so Play both compares the same musical part even if tempos differ.${durNote}`
+      ? `Nice work — sections look close to your reference (tempo proxy + volume). Sections are defined on the reference, then DTW-aligned to Alexia’s take (silence-trimmed).${savedNote}${durNote}`
+      : `Hone these sections: ${hone.join(', ')}. Sections follow the reference performance; Alexia’s windows are DTW-aligned (silence-trimmed, duration-clamped).${savedNote}${durNote}`
 
   return {
-    mode: 'comparison',
-    sections,
-    summary,
-    honeSections: hone,
-    durationSec: studentDuration,
+    result: {
+      mode: 'comparison',
+      sections,
+      summary,
+      honeSections: hone,
+      durationSec: studentDuration,
+    },
+    boundsActive: refBoundsActive.slice(),
+    activeDurationSec: refActiveDur,
+    boundsSource,
   }
 }

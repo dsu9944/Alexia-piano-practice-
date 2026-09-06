@@ -11,9 +11,12 @@ const SILENCE_ABS = 0.0015
 const SILENCE_PAD_SEC = 0.12
 /** Balanced length vs expected (refLen * studentActive/refActive). */
 const DUR_EXPAND_BELOW = 0.7
-const DUR_SHRINK_ABOVE = 1.35
-/** Mild valley snap only when slightly long — not an aggressive hard cap. */
-const DUR_MILD_LONG = 1.15
+/** Hard upper clamp — anti-spill (esp. S1); closer to expected than old 1.35. */
+const DUR_SHRINK_ABOVE = 1.15
+/** Soft valley-snap threshold when slightly long. */
+const DUR_MILD_LONG = 1.05
+/** Early sections (S1–S2) get a tighter anti-spill cap. */
+const DUR_EARLY_SHRINK_ABOVE = 1.08
 
 /** Guess mime from filename (Voice Memos are often .m4a with empty type). */
 function guessMimeFromName(name?: string): string | undefined {
@@ -587,8 +590,134 @@ function cumulativeOnsetBoundaries(
 }
 
 /**
- * Pull Alexia's section end earlier to a nearby energy valley / onset lull
- * so playback does not spill into the next phrase. Prefers shorter windows.
+ * Bias Alexia section *starts* later: after DTW maps sStart, snap forward to
+ * the next clear onset / energy rise within a small window so we do not include
+ * the tail of the previous phrase. Never snaps earlier than DTW.
+ */
+const START_SNAP_WINDOW_SEC = 0.75
+
+function snapStudentStartLater(
+  times: Float32Array,
+  rms: Float32Array,
+  onsets: Float32Array,
+  sStart: number,
+  latestAllowed: number,
+): number {
+  const windowEnd = Math.min(latestAllowed, sStart + START_SNAP_WINDOW_SEC)
+  if (windowEnd <= sStart + 0.03) return sStart
+
+  const smoothRms = smoothEnvelope(rms, 2)
+  const smoothOnsets = smoothEnvelope(onsets, 1)
+
+  let sumO = 0
+  let sumR = 0
+  let n = 0
+  for (let i = 0; i < times.length; i++) {
+    const t = times[i]
+    if (t < sStart || t > windowEnd) continue
+    sumO += smoothOnsets[i]
+    sumR += smoothRms[i]
+    n++
+  }
+  const meanOnset = n > 0 ? sumO / n : 0
+  const meanRms = n > 0 ? sumR / n : 0
+  const onsetThresh = Math.max(meanOnset * 1.6, 0.0015)
+  const riseThresh = Math.max(meanRms * 0.12, 0.0008)
+
+  // Prefer the earliest clear attack in the window (bias later than DTW, not earlier).
+  let bestT = sStart
+  let bestScore = -1
+  for (let i = 1; i < times.length - 1; i++) {
+    const t = times[i]
+    if (t < sStart || t > windowEnd) continue
+    const onsetPeak =
+      smoothOnsets[i] >= onsetThresh &&
+      smoothOnsets[i] >= smoothOnsets[i - 1] &&
+      smoothOnsets[i] >= smoothOnsets[i + 1]
+    const energyRise =
+      smoothRms[i] - smoothRms[i - 1] >= riseThresh &&
+      smoothRms[i] >= smoothRms[Math.max(0, i - 2)]
+    if (!onsetPeak && !energyRise) continue
+
+    const strength =
+      (meanOnset > 1e-9 ? smoothOnsets[i] / meanOnset : 0) * 0.65 +
+      (meanRms > 1e-9 ? Math.max(0, smoothRms[i] - smoothRms[i - 1]) / meanRms : 0) * 0.35
+    // Slight preference for sooner attacks inside the window (still >= sStart).
+    const earlyInWindow = 1 - (t - sStart) / Math.max(1e-6, windowEnd - sStart)
+    const score = strength + earlyInWindow * 0.15
+    if (score > bestScore) {
+      bestScore = score
+      bestT = t
+    }
+  }
+
+  return bestT > sStart ? bestT : sStart
+}
+
+/**
+ * If previous end sits on a strong onset that belongs to the next section,
+ * pull the previous end slightly earlier (prefer cutting previous early over
+ * starting next early).
+ */
+function pullPrevEndBeforeOnset(
+  times: Float32Array,
+  rms: Float32Array,
+  onsets: Float32Array,
+  prevStart: number,
+  prevEnd: number,
+  nextStart: number,
+  minWidth: number,
+): number {
+  const lookBack = 0.45
+  const searchFrom = Math.max(prevStart + minWidth, prevEnd - lookBack, nextStart - lookBack)
+  const searchTo = Math.min(prevEnd, nextStart)
+  if (searchTo <= searchFrom + 0.02) return prevEnd
+
+  void rms
+  const smoothOnsets = smoothEnvelope(onsets, 1)
+  let sumO = 0
+  let n = 0
+  for (let i = 0; i < times.length; i++) {
+    const t = times[i]
+    if (t < searchFrom || t > searchTo + 0.15) continue
+    sumO += smoothOnsets[i]
+    n++
+  }
+  const meanOnset = n > 0 ? sumO / n : 0
+  const thresh = Math.max(meanOnset * 1.7, 0.002)
+
+  // Find strongest onset near the boundary; if it sits at/after nextStart-ish,
+  // cut previous end just before that onset.
+  let onsetT = -1
+  let bestO = -1
+  for (let i = 1; i < times.length - 1; i++) {
+    const t = times[i]
+    if (t < searchFrom || t > searchTo + 0.1) continue
+    if (
+      smoothOnsets[i] > thresh &&
+      smoothOnsets[i] >= smoothOnsets[i - 1] &&
+      smoothOnsets[i] >= smoothOnsets[i + 1]
+    ) {
+      if (smoothOnsets[i] > bestO) {
+        bestO = smoothOnsets[i]
+        onsetT = t
+      }
+    }
+  }
+  if (onsetT < 0) return prevEnd
+  // Onset belongs to next section if it is at/after the intended next start
+  // or very close to the previous end (carry-over).
+  if (onsetT >= nextStart - 0.08 || onsetT >= prevEnd - 0.25) {
+    const cut = Math.max(prevStart + minWidth, onsetT - 0.04)
+    return Math.min(prevEnd, cut)
+  }
+  return prevEnd
+}
+
+/**
+ * Pull Alexia section end earlier to a nearby energy valley / onset lull,
+ * and never past the next phrase onset cluster. Strong shortBias so S1
+ * does not spill into phrase 2.
  */
 function snapStudentEndEarlier(
   times: Float32Array,
@@ -598,8 +727,9 @@ function snapStudentEndEarlier(
   sEnd: number,
   hardCap: number,
   minWidth: number,
+  nextPhraseStart?: number,
 ): number {
-  const cap = Math.min(sEnd, hardCap)
+  let cap = Math.min(sEnd, hardCap)
   const earliest = sStart + minWidth
   if (cap <= earliest + 0.02) {
     return Math.max(sStart + Math.min(minWidth, 0.08), Math.min(cap, hardCap))
@@ -607,6 +737,40 @@ function snapStudentEndEarlier(
 
   const smoothRms = smoothEnvelope(rms, 3)
   const smoothOnsets = smoothEnvelope(onsets, 2)
+
+  // Cut before the next section onset cluster if it falls inside our window.
+  const nextBound =
+    nextPhraseStart !== undefined && Number.isFinite(nextPhraseStart)
+      ? nextPhraseStart
+      : cap
+  const clusterLook = Math.min(cap + 0.35, Math.max(cap, nextBound + 0.15))
+  let sumOAll = 0
+  let nAll = 0
+  for (let i = 0; i < times.length; i++) {
+    const t = times[i]
+    if (t < Math.max(earliest, cap - 0.9) || t > clusterLook) continue
+    sumOAll += smoothOnsets[i]
+    nAll++
+  }
+  const meanOAll = nAll > 0 ? sumOAll / nAll : 0
+  const clusterThresh = Math.max(meanOAll * 1.55, 0.002)
+  let firstNextOnset = -1
+  for (let i = 1; i < times.length - 1; i++) {
+    const t = times[i]
+    if (t < Math.max(earliest + 0.05, nextBound - 0.55) || t > clusterLook) continue
+    if (
+      smoothOnsets[i] >= clusterThresh &&
+      smoothOnsets[i] >= smoothOnsets[i - 1] &&
+      smoothOnsets[i] >= smoothOnsets[i + 1]
+    ) {
+      firstNextOnset = t
+      break
+    }
+  }
+  if (firstNextOnset > 0) {
+    cap = Math.min(cap, Math.max(earliest, firstNextOnset - 0.05))
+  }
+
   let sumR = 0
   let sumO = 0
   let n = 0
@@ -630,31 +794,30 @@ function snapStudentEndEarlier(
     const isValley =
       smoothRms[i] <= smoothRms[i - 1] &&
       smoothRms[i] <= smoothRms[i + 1] &&
-      (meanRms <= 1e-9 || smoothRms[i] <= meanRms * 0.9)
-    const onsetLull = meanOnset <= 1e-9 || smoothOnsets[i] <= meanOnset * 0.6
+      (meanRms <= 1e-9 || smoothRms[i] <= meanRms * 0.92)
+    const onsetLull = meanOnset <= 1e-9 || smoothOnsets[i] <= meanOnset * 0.65
     if (!isValley && !onsetLull) continue
 
     const depth = meanRms > 1e-9 ? 1 - smoothRms[i] / meanRms : 0.5
     const lull = meanOnset > 1e-9 ? 1 - smoothOnsets[i] / meanOnset : 0.5
-    // Bias toward earlier cut (shorter Alexia window) while still rewarding clear valleys.
+    // Stronger shortBias: prefer cutting early over spilling into next phrase.
     const shortBias = (cap - t) / span
-    const score = depth * 0.45 + lull * 0.25 + shortBias * 0.5
+    const score = depth * 0.35 + lull * 0.2 + shortBias * 0.65
     if (score > bestScore) {
       bestScore = score
       bestT = t
     }
   }
 
-  return Math.min(bestT, hardCap)
+  return Math.min(bestT, hardCap, cap)
 }
 
 /**
- * Map each reference section to Alexia's timeline via DTW (balanced length).
- * Start from DTW [sStart,sEnd]. expected = refLen * (studentActive/refActive).
- * If mapped > 1.35×expected → shrink (fix spill). If mapped < 0.7×expected →
- * expand toward expected (fix too-short), staying before next mapped start.
- * Never eat the next phrase; prefer not truncating the current phrase early.
- * Overlaps: cut earlier end only.
+ * Map each reference section to Alexia timeline via DTW (balanced length).
+ * Starts: snap *forward* to next clear onset (fix S5-too-early).
+ * Ends: snap *backward* to valley / before next onset cluster; hard clamp
+ * ~1.15x expected (tighter ~1.08x for S1-S2) so S1 never includes S2.
+ * Expand when <0.7x expected (avoid S3-too-short). Enforce sStart[i] >= sEnd[i-1].
  */
 function mapRefSectionsToStudent(
   refBounds: number[],
@@ -686,27 +849,59 @@ function mapRefSectionsToStudent(
     mappedEnds.push(sEnd)
   }
 
+  // Snap each DTW start forward to the next clear onset / energy rise.
+  const snappedStarts: number[] = []
+  for (let i = 0; i < count; i++) {
+    let sStart = Math.max(0, Math.min(studentActiveDur, mappedStarts[i]))
+    const sEndRaw = Math.max(0, Math.min(studentActiveDur, mappedEnds[i]))
+    const latestForStart = Math.max(sStart, Math.min(sEndRaw - minWidth, studentActiveDur))
+    if (i > 0) {
+      // Leave room after previous DTW end; final no-overlap pass tightens further.
+      sStart = Math.max(sStart, mappedEnds[i - 1])
+    }
+    sStart = snapStudentStartLater(
+      studentTimes,
+      studentRms,
+      studentOnsets,
+      sStart,
+      latestForStart,
+    )
+    snappedStarts.push(sStart)
+  }
+
   const windows: { rStart: number; rEnd: number; sStart: number; sEnd: number }[] = []
   for (let i = 0; i < count; i++) {
     const rStart = refBounds[i]
     const rEnd = refBounds[i + 1]
-    let sStart = Math.max(0, Math.min(studentActiveDur, mappedStarts[i]))
+    let sStart = snappedStarts[i]
     let sEnd = Math.max(0, Math.min(studentActiveDur, mappedEnds[i]))
+
+    // No overlap with previous finalized window.
+    if (i > 0) {
+      const prevEnd = windows[i - 1].sEnd
+      if (sStart < prevEnd + gapEps) {
+        sStart = Math.min(studentActiveDur, prevEnd + gapEps)
+      }
+    }
     if (sEnd < sStart) {
-      const tmp = sStart
-      sStart = sEnd
-      sEnd = tmp
+      sEnd = Math.min(studentActiveDur, sStart + minWidth)
     }
 
-    const nextMappedStart = i + 1 < count ? mappedStarts[i + 1] : studentActiveDur
-    const hardCap = Math.max(sStart + minWidth * 0.5, Math.min(studentActiveDur, nextMappedStart - gapEps))
+    const nextSnappedStart = i + 1 < count ? snappedStarts[i + 1] : studentActiveDur
+    // Hard cap before next phrase start — S1 must never include S2 material.
+    const hardCap = Math.max(
+      sStart + minWidth * 0.5,
+      Math.min(studentActiveDur, nextSnappedStart - gapEps),
+    )
 
     const refLen = Math.max(0.001, rEnd - rStart)
     const expected = refLen * globalTempo
+    // Early sections (esp. S1) get a tighter anti-spill upper bound.
+    const shrinkAbove = i <= 1 ? DUR_EARLY_SHRINK_ABOVE : DUR_SHRINK_ABOVE
     let mappedLen = Math.max(0, sEnd - sStart)
 
-    if (mappedLen > DUR_SHRINK_ABOVE * expected) {
-      // Too long / spill — shrink toward expected, then valley-snap earlier.
+    // Always valley-/onset-snap ends earlier when long; always respect next-phrase onset.
+    if (mappedLen > shrinkAbove * expected) {
       const shrinkTo = Math.min(sEnd, sStart + expected, hardCap)
       sEnd = snapStudentEndEarlier(
         studentTimes,
@@ -716,47 +911,102 @@ function mapRefSectionsToStudent(
         Math.max(shrinkTo, sStart + minWidth),
         hardCap,
         minWidth,
+        nextSnappedStart,
       )
-      if (sEnd - sStart > DUR_SHRINK_ABOVE * expected) {
-        sEnd = Math.min(hardCap, sStart + DUR_SHRINK_ABOVE * expected)
+      if (sEnd - sStart > shrinkAbove * expected) {
+        sEnd = Math.min(hardCap, sStart + shrinkAbove * expected)
       }
     } else if (mappedLen < DUR_EXPAND_BELOW * expected) {
-      // Too short (e.g. S3 cut off) — expand toward expected, do NOT valley-snap shorter.
+      // Too short (e.g. S3) — expand toward expected, but never past next phrase.
       const expandTo = Math.min(hardCap, sStart + expected)
       sEnd = Math.max(sEnd, expandTo)
-      // If hardCap blocks full expected, take as much as we can before next phrase.
       if (sEnd - sStart < DUR_EXPAND_BELOW * expected) {
         sEnd = Math.min(hardCap, Math.max(sEnd, sStart + DUR_EXPAND_BELOW * expected))
       }
+      sEnd = snapStudentEndEarlier(
+        studentTimes,
+        studentRms,
+        studentOnsets,
+        sStart,
+        sEnd,
+        hardCap,
+        minWidth,
+        nextSnappedStart,
+      )
+      // Don't let onset-snap undo a needed expand below the floor (unless hardCap).
+      if (sEnd - sStart < DUR_EXPAND_BELOW * expected * 0.9) {
+        sEnd = Math.min(hardCap, Math.max(sEnd, sStart + DUR_EXPAND_BELOW * expected * 0.9))
+      }
     } else {
-      // In band: keep DTW end, cap before next phrase; mild valley only if slightly long.
+      // In band: cap before next phrase; snap earlier for mild-long or early sections.
       sEnd = Math.min(sEnd, hardCap)
       mappedLen = sEnd - sStart
-      if (mappedLen > DUR_MILD_LONG * expected) {
-        const mild = Math.min(sEnd, sStart + expected * DUR_MILD_LONG)
-        sEnd = snapStudentEndEarlier(
-          studentTimes,
-          studentRms,
-          studentOnsets,
-          sStart,
-          mild,
-          hardCap,
-          minWidth,
-        )
-      }
+      const mildCap = Math.min(
+        sEnd,
+        sStart + expected * (mappedLen > DUR_MILD_LONG * expected || i <= 1 ? shrinkAbove : 1.0),
+      )
+      sEnd = snapStudentEndEarlier(
+        studentTimes,
+        studentRms,
+        studentOnsets,
+        sStart,
+        mildCap,
+        hardCap,
+        minWidth,
+        nextSnappedStart,
+      )
     }
 
-    sEnd = Math.min(hardCap, Math.max(sStart + Math.min(minWidth, 0.08), sEnd))
+    // Absolute anti-spill clamp to shrinkAbove x expected.
+    sEnd = Math.min(hardCap, sStart + shrinkAbove * expected, sEnd)
+    sEnd = Math.max(sStart + Math.min(minWidth, 0.08), sEnd)
     windows.push({ rStart, rEnd, sStart, sEnd })
+
+    // If this section's start sits on a strong onset still covered by previous end,
+    // pull previous end earlier (prefer cutting previous early).
+    if (i > 0) {
+      windows[i - 1].sEnd = pullPrevEndBeforeOnset(
+        studentTimes,
+        studentRms,
+        studentOnsets,
+        windows[i - 1].sStart,
+        windows[i - 1].sEnd,
+        sStart,
+        minWidth,
+      )
+      if (windows[i].sStart < windows[i - 1].sEnd + gapEps) {
+        windows[i].sStart = Math.min(studentActiveDur, windows[i - 1].sEnd + gapEps)
+        if (windows[i].sEnd < windows[i].sStart + Math.min(minWidth, 0.08)) {
+          windows[i].sEnd = Math.min(
+            studentActiveDur,
+            windows[i].sStart + Math.min(minWidth, 0.08),
+          )
+        }
+      }
+    }
   }
 
-  // Overlap repair: cut the earlier section's end only — never push the later start later.
+  // Final overlap repair: enforce sStart[i] >= sEnd[i-1]; cut previous end first,
+  // then nudge start forward if still colliding.
   for (let i = 0; i < windows.length - 1; i++) {
     if (windows[i].sEnd > windows[i + 1].sStart - gapEps) {
-      windows[i].sEnd = Math.max(
+      const cut = Math.max(
         windows[i].sStart + Math.min(minWidth, 0.08),
         windows[i + 1].sStart - gapEps,
       )
+      windows[i].sEnd = Math.min(windows[i].sEnd, cut)
+      if (windows[i].sEnd > windows[i + 1].sStart - gapEps) {
+        windows[i + 1].sStart = Math.min(
+          studentActiveDur,
+          windows[i].sEnd + gapEps,
+        )
+        if (windows[i + 1].sEnd < windows[i + 1].sStart + Math.min(minWidth, 0.08)) {
+          windows[i + 1].sEnd = Math.min(
+            studentActiveDur,
+            windows[i + 1].sStart + Math.min(minWidth, 0.08),
+          )
+        }
+      }
     }
   }
 

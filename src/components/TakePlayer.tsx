@@ -230,14 +230,18 @@ export const TakePlayer = forwardRef<TakePlayerHandle, Props>(function TakePlaye
             </button>
           </div>
           {url && (
-            <audio
-              ref={audioRef}
-              src={url}
-              preload="auto"
-              onError={() => {
-                void handleError()
-              }}
-            />
+            <div className="playback">
+              <p className="label">Scrub here, then use Mark Alexia start/end in Practice sections</p>
+              <audio
+                ref={audioRef}
+                controls
+                src={url}
+                preload="auto"
+                onError={() => {
+                  void handleError()
+                }}
+              />
+            </div>
           )}
           {error && <p className="error">{error}</p>}
         </>

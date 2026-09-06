@@ -491,7 +491,7 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     const n = sections.length + 1
     const prev = sections[sections.length - 1]
     const ytStart = prev ? prev.youtubeEndSec : 0
-    const ytEnd = round1(ytStart + 10)
+    const ytEnd = round1(ytStart + 20)
     const next: PracticeSection = {
       id: newSectionId(),
       label: `Section ${n}`,
@@ -577,7 +577,7 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     }
     if (sections.length === 0) return
     const firstId = sections[0].id
-    const cur = alexia[firstId] ?? { startSec: 0, endSec: 10 }
+    const cur = alexia[firstId] ?? { startSec: 0, endSec: 20 }
     const end = Math.max(cur.endSec, round1(startSec + 0.5))
     void persistAlexia({
       ...alexia,

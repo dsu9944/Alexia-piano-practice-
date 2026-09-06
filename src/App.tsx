@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from 'react'
-import { ComparisonView, type AnalyzedPayload } from './components/ComparisonView'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { PieceNotes } from './components/PieceNotes'
 import { PiecePicker } from './components/PiecePicker'
+import { PracticeSections } from './components/PracticeSections'
 import { Recorder } from './components/Recorder'
+import { TakePlayer, type TakePlayerHandle } from './components/TakePlayer'
 import { TakesList } from './components/TakesList'
-import { YouTubePlayer } from './components/YouTubePlayer'
+import { YouTubePlayer, type YouTubePlayerHandle } from './components/YouTubePlayer'
 import { PIECES } from './data/pieces'
 import {
   countTakesByPiece,
@@ -15,7 +16,6 @@ import {
   savePieceNotes,
   saveTake,
   setSelectedPieceId,
-  updateTakeAnalysis,
   updateTakeNotes,
 } from './lib/storage'
 import type { Piece, Take } from './types'
@@ -32,6 +32,9 @@ function pieceTitle(pieceId: string): string {
 export default function App() {
   const initial =
     PIECES.find((p) => p.id === getSelectedPieceId()) ?? PIECES[0]
+
+  const youtubeRef = useRef<YouTubePlayerHandle | null>(null)
+  const takePlayerRef = useRef<TakePlayerHandle | null>(null)
 
   const [piece, setPiece] = useState<Piece>(initial)
   const [takes, setTakes] = useState<Take[]>([])
@@ -108,31 +111,6 @@ export default function App() {
     setSelectedTake((prev) => (prev && prev.id === id ? { ...prev, notes: text } : prev))
   }
 
-  const handleAnalyzed = async (takeId: string, payload: AnalyzedPayload) => {
-    const { result, reference } = payload
-    // Always keep analysis in memory first — never wipe the take if IDB persist fails.
-    const patch = (t: Take): Take => {
-      if (t.id !== takeId) return t
-      return {
-        ...t,
-        // Preserve the exact same blob reference so Saved Takes <audio> URLs stay valid.
-        blob: t.blob,
-        analysis: result,
-        ...(reference
-          ? { referenceBlob: reference.blob, referenceFileName: reference.fileName }
-          : {}),
-      }
-    }
-    setTakes((prev) => prev.map(patch))
-    setSelectedTake((prev) => (prev && prev.id === takeId ? patch(prev) : prev))
-
-    try {
-      await updateTakeAnalysis(takeId, result, reference)
-    } catch (err) {
-      console.error('Failed to persist analysis (take audio + on-screen result are still safe):', err)
-    }
-  }
-
   const handleNotesChange = (text: string) => {
     setNotes(text)
     void savePieceNotes(piece.id, text)
@@ -145,7 +123,8 @@ export default function App() {
           <p className="eyebrow">Suzuki Piano School · Book 2</p>
           <h1>Alexia Piano Practice</h1>
           <p className="tagline">
-            Listen, record, and gently hone each piece — all on this device, no account needed.
+            Mark the same bit on YouTube and on Alexia’s take, then play each clip to compare by ear.
+            All on this device — no account, no auto scoring.
           </p>
         </div>
       </header>
@@ -167,7 +146,14 @@ export default function App() {
           {piece.composer && <p className="composer">{piece.composer}</p>}
         </div>
 
-        <YouTubePlayer youtubeId={piece.youtubeId} title={piece.title} />
+        <YouTubePlayer ref={youtubeRef} youtubeId={piece.youtubeId} title={piece.title} />
+        <TakePlayer ref={takePlayerRef} take={selectedTake} />
+        <PracticeSections
+          pieceId={piece.id}
+          takeId={selectedTake?.id ?? null}
+          youtubeRef={youtubeRef}
+          takeRef={takePlayerRef}
+        />
         <Recorder onSave={handleSaveTake} />
 
         {!loadError && takes.length === 0 && otherPieceCounts.length > 0 && (
@@ -203,20 +189,13 @@ export default function App() {
           onDelete={handleDelete}
           onUpdateNotes={handleTakeNotes}
         />
-        <ComparisonView
-          key={selectedTake?.id ?? 'none'}
-          take={selectedTake}
-          pieceId={piece.id}
-          onAnalyzed={handleAnalyzed}
-        />
         <PieceNotes value={notes} onChange={handleNotesChange} />
       </main>
 
       <footer className="footer">
         <p>
-          Recordings and notes stay in this browser (IndexedDB). Reference compare needs an audio file
-          you own — we never download YouTube audio. After Compare, the reference is saved with the
-          take so Play reference / Play both still work after refresh.
+          Recordings, notes, and section marks stay in this browser (IndexedDB). YouTube audio is never
+          downloaded — compare by ear with short clips you mark yourself.
         </p>
       </footer>
     </div>

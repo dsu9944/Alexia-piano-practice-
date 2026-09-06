@@ -5,35 +5,6 @@ export interface Piece {
   composer?: string
 }
 
-export type SectionScore = 'green' | 'amber' | 'red'
-
-export interface SectionAnalysis {
-  index: number
-  label: string
-  /** Alexia’s window for this section (solo: equal slices; comparison: DTW-aligned to reference). */
-  startSec: number
-  endSec: number
-  /** Canonical section on the reference (comparison mode only). */
-  refStartSec?: number
-  refEndSec?: number
-  tempoScore: SectionScore
-  volumeScore: SectionScore
-  overall: SectionScore
-  notes: string
-  studentTempoProxy: number
-  studentVolumeRms: number
-  referenceTempoProxy?: number
-  referenceVolumeRms?: number
-}
-
-export interface AnalysisResult {
-  mode: 'solo' | 'comparison'
-  sections: SectionAnalysis[]
-  summary: string
-  honeSections: string[]
-  durationSec: number
-}
-
 export interface Take {
   id: string
   pieceId: string
@@ -41,10 +12,6 @@ export interface Take {
   durationMs: number
   blob: Blob
   notes: string
-  analysis?: AnalysisResult
-  /** Persisted when a comparison is run so Play reference survives refresh. */
-  referenceBlob?: Blob
-  referenceFileName?: string
 }
 
 export interface PieceNotes {
@@ -53,19 +20,24 @@ export interface PieceNotes {
   updatedAt: number
 }
 
-/** Durable reference phrase cuts for a piece + reference file. */
-export interface PieceSectionMap {
+/** YouTube window for a named practice bit — shared across takes for a piece. */
+export interface PracticeSection {
   id: string
+  label: string
+  youtubeStartSec: number
+  youtubeEndSec: number
+}
+
+export interface PiecePracticeSections {
   pieceId: string
-  /** Stable key: name|size|type of the reference file. */
-  refKey: string
-  refFileName?: string
-  refSize: number
-  /**
-   * Boundary times on the silence-trimmed reference timeline
-   * (length = sectionCount + 1, includes 0 and activeDuration).
-   */
-  boundsActive: number[]
-  activeDurationSec: number
+  sections: PracticeSection[]
+  updatedAt: number
+}
+
+/** Alexia take windows keyed by practice section id. */
+export interface TakeSectionTimes {
+  takeId: string
+  /** sectionId → start/end on this take */
+  bySection: Record<string, { startSec: number; endSec: number }>
   updatedAt: number
 }

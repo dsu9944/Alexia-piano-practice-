@@ -1,12 +1,19 @@
-import type { AnalysisResult, PieceNotes, PieceSectionMap, Take } from '../types'
+import type {
+  PieceNotes,
+  PiecePracticeSections,
+  Take,
+  TakeSectionTimes,
+} from '../types'
 import { reviveAudioBlob } from './audioMime'
 
 const DB_NAME = 'alexia-piano-practice'
-/** v2: pieceSectionMap for durable reference phrase cuts. */
-const DB_VERSION = 2
+/** v3: practiceSections (YT per piece) + takeSectionTimes (Alexia per take). */
+const DB_VERSION = 3
 const TAKES_STORE = 'takes'
 const NOTES_STORE = 'notes'
 const SECTION_MAP_STORE = 'pieceSectionMap'
+const PRACTICE_SECTIONS_STORE = 'practiceSections'
+const TAKE_SECTION_TIMES_STORE = 'takeSectionTimes'
 const META_KEY = 'alexia-piano-meta'
 
 interface TakeRecord {
@@ -16,8 +23,8 @@ interface TakeRecord {
   durationMs: number
   blob?: Blob
   notes: string
+  /** Legacy fields — ignored by the ear-compare UI. */
   analysisJson?: string
-  /** Optional — older records omit these; IndexedDB put merges fine. */
   referenceBlob?: Blob
   referenceFileName?: string
 }
@@ -41,89 +48,16 @@ function openDb(): Promise<IDBDatabase> {
         const store = db.createObjectStore(SECTION_MAP_STORE, { keyPath: 'id' })
         store.createIndex('pieceId', 'pieceId', { unique: false })
       }
-    }
-  })
-}
-
-/** Key for matching the same reference file across practice sessions. */
-export function referenceFileKey(fileName: string | undefined, blob: Blob): string {
-  const name = (fileName || 'reference').trim().toLowerCase()
-  const type = (blob.type || '').split(';')[0].trim().toLowerCase()
-  return `${name}|${blob.size}|${type}`
-}
-
-export function sectionMapId(pieceId: string, refKey: string): string {
-  return `${pieceId}::${refKey}`
-}
-
-export async function getPieceSectionMap(
-  pieceId: string,
-  refKey: string,
-): Promise<PieceSectionMap | null> {
-  const db = await openDb()
-  const id = sectionMapId(pieceId, refKey)
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(SECTION_MAP_STORE, 'readonly')
-    const req = tx.objectStore(SECTION_MAP_STORE).get(id)
-    req.onsuccess = () => resolve((req.result as PieceSectionMap) ?? null)
-    req.onerror = () => reject(req.error)
-  })
-}
-
-export async function savePieceSectionMap(map: PieceSectionMap): Promise<void> {
-  const db = await openDb()
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(SECTION_MAP_STORE, 'readwrite')
-    tx.objectStore(SECTION_MAP_STORE).put(map)
-    tx.oncomplete = () => resolve()
-    tx.onerror = () => reject(tx.error)
-  })
-}
-
-export async function deletePieceSectionMap(pieceId: string, refKey: string): Promise<void> {
-  const db = await openDb()
-  const id = sectionMapId(pieceId, refKey)
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(SECTION_MAP_STORE, 'readwrite')
-    tx.objectStore(SECTION_MAP_STORE).delete(id)
-    tx.oncomplete = () => resolve()
-    tx.onerror = () => reject(tx.error)
-  })
-}
-
-/** Any saved section map for this piece (newest by updatedAt). */
-export async function getLatestSectionMapForPiece(
-  pieceId: string,
-): Promise<PieceSectionMap | null> {
-  const db = await openDb()
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(SECTION_MAP_STORE, 'readonly')
-    const index = tx.objectStore(SECTION_MAP_STORE).index('pieceId')
-    const req = index.getAll(pieceId)
-    req.onsuccess = () => {
-      const rows = (req.result as PieceSectionMap[]) || []
-      if (rows.length === 0) {
-        resolve(null)
-        return
+      if (!db.objectStoreNames.contains(PRACTICE_SECTIONS_STORE)) {
+        db.createObjectStore(PRACTICE_SECTIONS_STORE, { keyPath: 'pieceId' })
       }
-      rows.sort((a, b) => b.updatedAt - a.updatedAt)
-      resolve(rows[0])
+      if (!db.objectStoreNames.contains(TAKE_SECTION_TIMES_STORE)) {
+        db.createObjectStore(TAKE_SECTION_TIMES_STORE, { keyPath: 'takeId' })
+      }
     }
-    req.onerror = () => reject(req.error)
   })
 }
 
-function parseAnalysis(json: string | undefined): AnalysisResult | undefined {
-  if (!json) return undefined
-  try {
-    return JSON.parse(json) as AnalysisResult
-  } catch (err) {
-    console.warn('Skipping corrupt analysis JSON for a take; keeping audio.', err)
-    return undefined
-  }
-}
-
-/** Map a DB record to a Take. Returns null if the audio blob is missing/unusable. */
 async function recordToTake(r: TakeRecord): Promise<Take | null> {
   if (!r.blob || !(r.blob instanceof Blob) || r.blob.size === 0) {
     console.warn('Skipping take with missing/empty audio blob:', r.id, r.pieceId)
@@ -137,17 +71,6 @@ async function recordToTake(r: TakeRecord): Promise<Take | null> {
     blob = r.blob
   }
 
-  let referenceBlob = r.referenceBlob
-  if (referenceBlob && referenceBlob instanceof Blob && referenceBlob.size > 0) {
-    try {
-      referenceBlob = await reviveAudioBlob(referenceBlob)
-    } catch {
-      // keep original
-    }
-  } else {
-    referenceBlob = undefined
-  }
-
   return {
     id: r.id,
     pieceId: r.pieceId,
@@ -155,9 +78,6 @@ async function recordToTake(r: TakeRecord): Promise<Take | null> {
     durationMs: r.durationMs,
     blob,
     notes: r.notes ?? '',
-    analysis: parseAnalysis(r.analysisJson),
-    referenceBlob,
-    referenceFileName: r.referenceFileName,
   }
 }
 
@@ -184,9 +104,6 @@ export async function saveTake(take: Take): Promise<void> {
     durationMs: take.durationMs,
     blob: take.blob,
     notes: take.notes,
-    analysisJson: take.analysis ? JSON.stringify(take.analysis) : undefined,
-    referenceBlob: take.referenceBlob,
-    referenceFileName: take.referenceFileName,
   }
   return new Promise((resolve, reject) => {
     const tx = db.transaction(TAKES_STORE, 'readwrite')
@@ -214,7 +131,6 @@ export async function getTakesForPiece(pieceId: string): Promise<Take[]> {
   })
 }
 
-/** All takes across pieces — for recovery / empty-piece hints. */
 export async function listAllTakes(): Promise<Take[]> {
   const db = await openDb()
   return new Promise((resolve, reject) => {
@@ -232,7 +148,6 @@ export async function listAllTakes(): Promise<Take[]> {
   })
 }
 
-/** Counts of recoverable takes per pieceId (audio present). */
 export async function countTakesByPiece(): Promise<Record<string, number>> {
   const all = await listAllTakes()
   const counts: Record<string, number> = {}
@@ -262,85 +177,12 @@ export async function updateTakeNotes(id: string, notes: string): Promise<void> 
   })
 }
 
-export type ReferenceAudioUpdate = {
-  blob: Blob
-  fileName?: string
-}
-
-function putRecord(db: IDBDatabase, record: TakeRecord): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(TAKES_STORE, 'readwrite')
-    tx.objectStore(TAKES_STORE).put(record)
-    tx.oncomplete = () => resolve()
-    tx.onerror = () => reject(tx.error)
-  })
-}
-
-export async function updateTakeAnalysis(
-  id: string,
-  analysis: AnalysisResult,
-  reference?: ReferenceAudioUpdate,
-): Promise<void> {
-  const db = await openDb()
-  const existing = await new Promise<TakeRecord>((resolve, reject) => {
-    const tx = db.transaction(TAKES_STORE, 'readonly')
-    const req = tx.objectStore(TAKES_STORE).get(id)
-    req.onsuccess = () => {
-      const r = req.result as TakeRecord | undefined
-      if (!r) reject(new Error('Take not found'))
-      else resolve(r)
-    }
-    req.onerror = () => reject(req.error)
-  })
-
-  const analysisJson = JSON.stringify(analysis)
-  const base: TakeRecord = {
-    ...existing,
-    analysisJson,
-  }
-
-  // Prefer saving analysis + new reference together.
-  if (reference) {
-    try {
-      await putRecord(db, {
-        ...base,
-        referenceBlob: reference.blob,
-        referenceFileName: reference.fileName,
-      })
-      return
-    } catch (err) {
-      console.warn(
-        'Could not save reference audio (likely quota). Keeping analysis without the new reference.',
-        err,
-      )
-    }
-  }
-
-  // Analysis with whatever reference was already stored (or none).
-  try {
-    await putRecord(db, base)
-    return
-  } catch (err) {
-    console.warn('Retrying analysis save without reference blobs (quota).', err)
-  }
-
-  // Last resort: keep take audio + analysis only — never fail silently / corrupt.
-  await putRecord(db, {
-    id: existing.id,
-    pieceId: existing.pieceId,
-    createdAt: existing.createdAt,
-    durationMs: existing.durationMs,
-    blob: existing.blob,
-    notes: existing.notes,
-    analysisJson,
-  })
-}
-
 export async function deleteTake(id: string): Promise<void> {
   const db = await openDb()
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(TAKES_STORE, 'readwrite')
+    const tx = db.transaction([TAKES_STORE, TAKE_SECTION_TIMES_STORE], 'readwrite')
     tx.objectStore(TAKES_STORE).delete(id)
+    tx.objectStore(TAKE_SECTION_TIMES_STORE).delete(id)
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(tx.error)
   })
@@ -362,6 +204,50 @@ export async function savePieceNotes(pieceId: string, text: string): Promise<voi
   return new Promise((resolve, reject) => {
     const tx = db.transaction(NOTES_STORE, 'readwrite')
     tx.objectStore(NOTES_STORE).put(notes)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+}
+
+export async function getPiecePracticeSections(
+  pieceId: string,
+): Promise<PiecePracticeSections | null> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PRACTICE_SECTIONS_STORE, 'readonly')
+    const req = tx.objectStore(PRACTICE_SECTIONS_STORE).get(pieceId)
+    req.onsuccess = () => resolve((req.result as PiecePracticeSections) ?? null)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+export async function savePiecePracticeSections(
+  row: PiecePracticeSections,
+): Promise<void> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PRACTICE_SECTIONS_STORE, 'readwrite')
+    tx.objectStore(PRACTICE_SECTIONS_STORE).put(row)
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+}
+
+export async function getTakeSectionTimes(takeId: string): Promise<TakeSectionTimes | null> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(TAKE_SECTION_TIMES_STORE, 'readonly')
+    const req = tx.objectStore(TAKE_SECTION_TIMES_STORE).get(takeId)
+    req.onsuccess = () => resolve((req.result as TakeSectionTimes) ?? null)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+export async function saveTakeSectionTimes(row: TakeSectionTimes): Promise<void> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(TAKE_SECTION_TIMES_STORE, 'readwrite')
+    tx.objectStore(TAKE_SECTION_TIMES_STORE).put(row)
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(tx.error)
   })

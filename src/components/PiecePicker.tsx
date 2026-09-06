@@ -17,7 +17,7 @@ export function PiecePicker({ selectedId, onSelect }: Props) {
       <label htmlFor="piece-select" className="piece-select-label">
         Choose a piece
       </label>
-      <p className="hint">Suzuki Piano School Book 2 — pick a piece to listen and practice.</p>
+      <p className="hint">Suzuki Piano School Book 2 — pick a piece to listen, record, and mark practice sections.</p>
       <select
         id="piece-select"
         className="piece-select"

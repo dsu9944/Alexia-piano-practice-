@@ -40,8 +40,6 @@ export function TakesList({ takes, selectedId, onSelect, onDelete, onUpdateNotes
   const [playErrors, setPlayErrors] = useState<Record<string, string>>({})
   const [retryIndex, setRetryIndex] = useState<Record<string, number>>({})
 
-  // Only rebuild players when audio identity changes — not after Compare
-  // updates analysis/reference on the same take blob (Safari “Error” flicker).
   const audioKey = takes.map((t) => `${t.id}:${t.blob.size}:${t.blob.type}`).join('|')
 
   useEffect(() => {
@@ -116,17 +114,14 @@ export function TakesList({ takes, selectedId, onSelect, onDelete, onUpdateNotes
   return (
     <div className="takes card">
       <h2>Saved takes</h2>
+      <p className="hint">Tap a take to select it for the big Play Alexia button above.</p>
       <ul className="takes-list">
         {takes.map((take) => (
           <li key={take.id} className={`take-item${selectedId === take.id ? ' selected' : ''}`}>
             <div className="take-header">
               <button type="button" className="linkish" onClick={() => onSelect(take)}>
                 {formatDate(take.createdAt)} · {formatDur(take.durationMs)}
-                {take.analysis && (
-                  <span className={`badge ${take.analysis.mode}`}>
-                    {take.analysis.mode === 'comparison' ? 'vs reference' : 'solo check'}
-                  </span>
-                )}
+                {selectedId === take.id && <span className="badge selected-badge">Selected</span>}
               </button>
               <div className="take-actions">
                 <button type="button" className="btn tiny ghost" onClick={() => downloadTake(take)}>

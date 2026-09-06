@@ -1,0 +1,44 @@
+:root {
+  font-family: "Segoe UI", "Helvetica Neue", system-ui, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #2c3340;
+  background: #f4f1ea;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background:
+    radial-gradient(ellipse at top left, #efe8dc 0%, transparent 50%),
+    radial-gradient(ellipse at bottom right, #e4ebe8 0%, transparent 45%),
+    #f4f1ea;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+h1,
+h2,
+h3 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: #1e2935;
+}

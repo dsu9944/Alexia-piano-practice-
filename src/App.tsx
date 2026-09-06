@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { ComparisonView } from './components/ComparisonView'
+import { ComparisonView, type AnalyzedPayload } from './components/ComparisonView'
 import { PieceNotes } from './components/PieceNotes'
 import { PiecePicker } from './components/PiecePicker'
 import { Recorder } from './components/Recorder'
@@ -17,7 +17,7 @@ import {
   updateTakeAnalysis,
   updateTakeNotes,
 } from './lib/storage'
-import type { AnalysisResult, Piece, Take } from './types'
+import type { Piece, Take } from './types'
 import './App.css'
 
 function newId(): string {
@@ -84,10 +84,33 @@ export default function App() {
     setSelectedTake((prev) => (prev && prev.id === id ? { ...prev, notes: text } : prev))
   }
 
-  const handleAnalyzed = async (takeId: string, result: AnalysisResult) => {
-    await updateTakeAnalysis(takeId, result)
-    setTakes((prev) => prev.map((t) => (t.id === takeId ? { ...t, analysis: result } : t)))
-    setSelectedTake((prev) => (prev && prev.id === takeId ? { ...prev, analysis: result } : prev))
+  const handleAnalyzed = async (takeId: string, payload: AnalyzedPayload) => {
+    const { result, reference } = payload
+    await updateTakeAnalysis(takeId, result, reference)
+    setTakes((prev) =>
+      prev.map((t) =>
+        t.id === takeId
+          ? {
+              ...t,
+              analysis: result,
+              ...(reference
+                ? { referenceBlob: reference.blob, referenceFileName: reference.fileName }
+                : {}),
+            }
+          : t,
+      ),
+    )
+    setSelectedTake((prev) =>
+      prev && prev.id === takeId
+        ? {
+            ...prev,
+            analysis: result,
+            ...(reference
+              ? { referenceBlob: reference.blob, referenceFileName: reference.fileName }
+              : {}),
+          }
+        : prev,
+    )
   }
 
   const handleNotesChange = (text: string) => {
@@ -137,7 +160,8 @@ export default function App() {
       <footer className="footer">
         <p>
           Recordings and notes stay in this browser (IndexedDB). Reference compare needs an audio file
-          you own — we never download YouTube audio.
+          you own — we never download YouTube audio. After Compare, the reference is saved with the
+          take so Play reference / Play both still work after refresh.
         </p>
       </footer>
     </div>

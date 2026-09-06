@@ -41,6 +41,9 @@ export interface Take {
   blob: Blob
   notes: string
   analysis?: AnalysisResult
+  /** Persisted when a comparison is run so Play reference survives refresh. */
+  referenceBlob?: Blob
+  referenceFileName?: string
 }
 
 export interface PieceNotes {

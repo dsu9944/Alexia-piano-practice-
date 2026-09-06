@@ -2,14 +2,21 @@ import { useEffect, useRef, useState } from 'react'
 import { analyzeComparison, analyzeSolo } from '../lib/audioAnalysis'
 import type { AnalysisResult, SectionAnalysis, SectionScore, Take } from '../types'
 
+export type AnalyzedPayload = {
+  result: AnalysisResult
+  /** Included when comparison runs so the reference survives refresh. */
+  reference?: { blob: Blob; fileName?: string }
+}
+
 interface Props {
   take: Take | null
-  onAnalyzed: (takeId: string, result: AnalysisResult) => void
+  onAnalyzed: (takeId: string, payload: AnalyzedPayload) => void
 }
 
 type PlayingClip = {
   sectionIndex: number
-  source: 'alexia' | 'reference'
+  source: 'alexia' | 'reference' | 'both'
+  phase?: 'alexia' | 'reference'
   label: string
 } | null
 
@@ -22,7 +29,8 @@ function formatRange(start: number, end: number): string {
 }
 
 export function ComparisonView({ take, onAnalyzed }: Props) {
-  const [refFile, setRefFile] = useState<File | null>(null)
+  const [refBlob, setRefBlob] = useState<Blob | null>(take?.referenceBlob ?? null)
+  const [refFileName, setRefFileName] = useState<string | null>(take?.referenceFileName ?? null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<AnalysisResult | null>(take?.analysis ?? null)
@@ -35,6 +43,9 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
   const stopTimerRef = useRef<number | null>(null)
   const timeUpdateHandlerRef = useRef<((ev: Event) => void) | null>(null)
   const activeAudioRef = useRef<HTMLAudioElement | null>(null)
+  /** Bumped on stop to cancel a Play-both chain mid-flight. */
+  const chainTokenRef = useRef(0)
+  const endResolverRef = useRef<((completed: boolean) => void) | null>(null)
 
   useEffect(() => {
     if (!take) {
@@ -49,16 +60,16 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
   }, [take])
 
   useEffect(() => {
-    if (!refFile) {
+    if (!refBlob) {
       setRefUrl(null)
       return
     }
-    const url = URL.createObjectURL(refFile)
+    const url = URL.createObjectURL(refBlob)
     setRefUrl(url)
     return () => {
       URL.revokeObjectURL(url)
     }
-  }, [refFile])
+  }, [refBlob])
 
   useEffect(() => {
     return () => {
@@ -67,6 +78,8 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
       if (audio && timeUpdateHandlerRef.current) {
         audio.removeEventListener('timeupdate', timeUpdateHandlerRef.current)
       }
+      endResolverRef.current?.(false)
+      endResolverRef.current = null
       alexiaAudioRef.current?.pause()
       refAudioRef.current?.pause()
     }
@@ -79,7 +92,14 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
     }
   }
 
+  function finishClip(completed: boolean) {
+    const resolve = endResolverRef.current
+    endResolverRef.current = null
+    resolve?.(completed)
+  }
+
   function stopPlayback() {
+    chainTokenRef.current += 1
     clearPlaybackTimers()
     const audio = activeAudioRef.current
     if (audio && timeUpdateHandlerRef.current) {
@@ -89,58 +109,125 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
     activeAudioRef.current = null
     alexiaAudioRef.current?.pause()
     refAudioRef.current?.pause()
+    finishClip(false)
     setPlaying(null)
   }
 
-  async function playSection(
+  /**
+   * Play one section clip. Resolves true when the clip ends naturally,
+   * false if stopped or failed. Does not clear a pending Play-both chain token.
+   */
+  function playSectionClip(
     sec: SectionAnalysis,
     source: 'alexia' | 'reference',
-  ) {
-    stopPlayback()
+    opts?: { keepPlayingUi?: PlayingClip },
+  ): Promise<boolean> {
+    clearPlaybackTimers()
+    const prevAudio = activeAudioRef.current
+    if (prevAudio && timeUpdateHandlerRef.current) {
+      prevAudio.removeEventListener('timeupdate', timeUpdateHandlerRef.current)
+    }
+    timeUpdateHandlerRef.current = null
+    activeAudioRef.current = null
+    alexiaAudioRef.current?.pause()
+    refAudioRef.current?.pause()
+    finishClip(false)
 
     const audio = source === 'alexia' ? alexiaAudioRef.current : refAudioRef.current
-    if (!audio) return
+    if (!audio) return Promise.resolve(false)
 
     const startSec = source === 'alexia' ? sec.startSec : (sec.refStartSec ?? sec.startSec)
     const endSec = source === 'alexia' ? sec.endSec : (sec.refEndSec ?? sec.endSec)
-    if (!(endSec > startSec)) return
+    if (!(endSec > startSec)) return Promise.resolve(false)
 
-    activeAudioRef.current = audio
-    const onTimeUpdate = () => {
-      if (audio.currentTime >= endSec - 0.02) {
+    return new Promise((resolve) => {
+      endResolverRef.current = resolve
+      activeAudioRef.current = audio
+
+      const complete = () => {
         audio.pause()
-        audio.removeEventListener('timeupdate', onTimeUpdate)
         if (timeUpdateHandlerRef.current === onTimeUpdate) {
+          audio.removeEventListener('timeupdate', onTimeUpdate)
           timeUpdateHandlerRef.current = null
           activeAudioRef.current = null
         }
         clearPlaybackTimers()
+        finishClip(true)
+      }
+
+      const onTimeUpdate = () => {
+        if (audio.currentTime >= endSec - 0.02) {
+          complete()
+        }
+      }
+      timeUpdateHandlerRef.current = onTimeUpdate
+      audio.addEventListener('timeupdate', onTimeUpdate)
+
+      const durationMs = Math.max(50, (endSec - startSec) * 1000) + 200
+      stopTimerRef.current = window.setTimeout(() => {
+        complete()
+      }, durationMs)
+
+      const ui: PlayingClip =
+        opts?.keepPlayingUi ??
+        ({ sectionIndex: sec.index, source, label: sec.label } satisfies NonNullable<PlayingClip>)
+
+      try {
+        audio.currentTime = startSec
+        setPlaying(ui)
+        void audio.play().catch((err) => {
+          console.error(err)
+          chainTokenRef.current += 1
+          clearPlaybackTimers()
+          if (timeUpdateHandlerRef.current === onTimeUpdate) {
+            audio.removeEventListener('timeupdate', onTimeUpdate)
+            timeUpdateHandlerRef.current = null
+            activeAudioRef.current = null
+          }
+          finishClip(false)
+          setPlaying(null)
+          setError('Could not play that section. Try again, or re-upload the audio.')
+        })
+      } catch (err) {
+        console.error(err)
+        finishClip(false)
         setPlaying(null)
+        setError('Could not play that section. Try again, or re-upload the audio.')
       }
-    }
-    timeUpdateHandlerRef.current = onTimeUpdate
-    audio.addEventListener('timeupdate', onTimeUpdate)
+    })
+  }
 
-    const durationMs = Math.max(50, (endSec - startSec) * 1000) + 200
-    stopTimerRef.current = window.setTimeout(() => {
-      audio.pause()
-      audio.removeEventListener('timeupdate', onTimeUpdate)
-      if (timeUpdateHandlerRef.current === onTimeUpdate) {
-        timeUpdateHandlerRef.current = null
-        activeAudioRef.current = null
-      }
-      setPlaying(null)
-    }, durationMs)
+  async function playSection(sec: SectionAnalysis, source: 'alexia' | 'reference') {
+    chainTokenRef.current += 1
+    const completed = await playSectionClip(sec, source)
+    if (completed) setPlaying(null)
+  }
 
-    try {
-      audio.currentTime = startSec
-      setPlaying({ sectionIndex: sec.index, source, label: sec.label })
-      await audio.play()
-    } catch (err) {
-      console.error(err)
-      stopPlayback()
-      setError('Could not play that section. Try again, or re-upload the audio.')
+  async function playBoth(sec: SectionAnalysis) {
+    const token = ++chainTokenRef.current
+    const bothAlexia: PlayingClip = {
+      sectionIndex: sec.index,
+      source: 'both',
+      phase: 'alexia',
+      label: sec.label,
     }
+    const okAlexia = await playSectionClip(sec, 'alexia', { keepPlayingUi: bothAlexia })
+    if (!okAlexia || chainTokenRef.current !== token) return
+
+    // Short gap between clips (one clip at a time; sequential).
+    await new Promise<void>((r) => {
+      window.setTimeout(r, 180)
+    })
+    if (chainTokenRef.current !== token) return
+
+    const bothRef: PlayingClip = {
+      sectionIndex: sec.index,
+      source: 'both',
+      phase: 'reference',
+      label: sec.label,
+    }
+    const okRef = await playSectionClip(sec, 'reference', { keepPlayingUi: bothRef })
+    if (chainTokenRef.current === token && okRef) setPlaying(null)
   }
 
   const runAnalysis = async (mode: 'solo' | 'comparison') => {
@@ -151,17 +238,22 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
     try {
       let analysis: AnalysisResult
       if (mode === 'comparison') {
-        if (!refFile) {
-          setError('Choose a reference audio file you own (CD rip / mp3) first.')
+        if (!refBlob) {
+          setError('Choose a reference audio file you own (CD rip / mp3 / Voice Memo) first.')
           setBusy(false)
           return
         }
-        analysis = await analyzeComparison(take.blob, refFile)
+        analysis = await analyzeComparison(take.blob, refBlob)
+        setResult(analysis)
+        onAnalyzed(take.id, {
+          result: analysis,
+          reference: { blob: refBlob, fileName: refFileName ?? undefined },
+        })
       } else {
         analysis = await analyzeSolo(take.blob)
+        setResult(analysis)
+        onAnalyzed(take.id, { result: analysis })
       }
-      setResult(analysis)
-      onAnalyzed(take.id, analysis)
     } catch (err) {
       console.error(err)
       setError('Analysis failed. Try a different audio format (wav/mp3/m4a/webm).')
@@ -180,7 +272,7 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
   }
 
   const display = result ?? take.analysis ?? null
-  const hasReferenceAudio = Boolean(refUrl)
+  const hasReferenceAudio = Boolean(refUrl && refBlob)
   const isComparison = display?.mode === 'comparison'
 
   return (
@@ -196,18 +288,30 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
 
       <div className="ref-upload">
         <label className="file-label">
-          Optional reference audio (your CD / mp3)
+          Optional reference audio (your CD / mp3 / Voice Memo)
           <input
             type="file"
             accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm"
             onChange={(e) => {
               const f = e.target.files?.[0] ?? null
               stopPlayback()
-              setRefFile(f)
+              if (f) {
+                setRefBlob(f)
+                setRefFileName(f.name)
+              } else {
+                setRefBlob(null)
+                setRefFileName(null)
+              }
             }}
           />
         </label>
-        {refFile && <p className="file-name">Selected: {refFile.name}</p>}
+        {refFileName && (
+          <p className="file-name">
+            {take.referenceBlob && refBlob === take.referenceBlob
+              ? `Saved reference: ${refFileName}`
+              : `Selected: ${refFileName}`}
+          </p>
+        )}
       </div>
 
       <div className="recorder-actions">
@@ -217,7 +321,7 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
         <button
           type="button"
           className="btn secondary"
-          disabled={busy || !refFile}
+          disabled={busy || !refBlob}
           onClick={() => runAnalysis('comparison')}
         >
           Compare to reference
@@ -242,18 +346,33 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
 
           {playing && (
             <p className="now-playing" role="status">
-              Playing {playing.source === 'alexia' ? 'Alexia' : 'reference'} · {playing.label}
+              {playing.source === 'both'
+                ? `Play both · ${playing.phase === 'reference' ? 'reference' : 'Alexia'} · ${playing.label}`
+                : `Playing ${playing.source === 'alexia' ? 'Alexia' : 'reference'} · ${playing.label}`}
               <button type="button" className="btn tiny ghost stop-inline" onClick={stopPlayback}>
                 Stop
               </button>
             </p>
           )}
 
+          {!hasReferenceAudio && (
+            <p className="play-hint-banner">
+              Upload your Voice Memo / CD track above, then Compare to reference.
+            </p>
+          )}
+
           <div className="section-grid">
             {display.sections.map((sec) => {
               const isThisPlaying = playing?.sectionIndex === sec.index
-              const alexiaActive = isThisPlaying && playing?.source === 'alexia'
-              const refActive = isThisPlaying && playing?.source === 'reference'
+              const alexiaActive =
+                isThisPlaying &&
+                ((playing?.source === 'alexia') ||
+                  (playing?.source === 'both' && playing?.phase === 'alexia'))
+              const refActive =
+                isThisPlaying &&
+                ((playing?.source === 'reference') ||
+                  (playing?.source === 'both' && playing?.phase === 'reference'))
+              const bothActive = isThisPlaying && playing?.source === 'both'
               const refStart = sec.refStartSec
               const refEnd = sec.refEndSec
 
@@ -275,41 +394,55 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
                   <div className="section-play">
                     <button
                       type="button"
-                      className={`btn tiny ${alexiaActive ? 'primary' : 'ghost'}`}
+                      className={`btn tiny ${alexiaActive && !bothActive ? 'primary' : 'ghost'}`}
                       onClick={() => {
-                        if (alexiaActive) stopPlayback()
+                        if (alexiaActive && !bothActive) stopPlayback()
                         else void playSection(sec, 'alexia')
                       }}
                       disabled={!alexiaUrl || busy}
                     >
-                      {alexiaActive ? 'Stop Alexia' : 'Play Alexia'}
+                      {alexiaActive && !bothActive ? 'Stop Alexia' : 'Play Alexia'}
                     </button>
 
-                    {isComparison ? (
-                      hasReferenceAudio ? (
-                        <button
-                          type="button"
-                          className={`btn tiny ${refActive ? 'secondary' : 'ghost'}`}
-                          onClick={() => {
-                            if (refActive) stopPlayback()
-                            else void playSection(sec, 'reference')
-                          }}
-                          disabled={busy}
-                          title={
-                            refStart != null && refEnd != null
-                              ? `Reference ${formatRange(refStart, refEnd)}`
-                              : 'Play matching reference section'
-                          }
-                        >
-                          {refActive ? 'Stop reference' : 'Play reference'}
-                        </button>
-                      ) : (
-                        <span className="play-note">Re-select reference to hear it</span>
-                      )
-                    ) : (
-                      <span className="play-note">No reference in solo mode</span>
-                    )}
+                    <button
+                      type="button"
+                      className={`btn tiny ${refActive && !bothActive ? 'secondary' : 'ghost'}`}
+                      onClick={() => {
+                        if (!hasReferenceAudio) return
+                        if (refActive && !bothActive) stopPlayback()
+                        else void playSection(sec, 'reference')
+                      }}
+                      disabled={!hasReferenceAudio || busy}
+                      title={
+                        hasReferenceAudio
+                          ? refStart != null && refEnd != null
+                            ? `Reference ${formatRange(refStart, refEnd)}`
+                            : 'Play matching reference section'
+                          : 'Upload a reference and Compare first'
+                      }
+                    >
+                      {refActive && !bothActive ? 'Stop reference' : 'Play reference'}
+                    </button>
+
+                    <button
+                      type="button"
+                      className={`btn tiny ${bothActive ? 'primary' : 'ghost'}`}
+                      onClick={() => {
+                        if (!hasReferenceAudio) return
+                        if (bothActive) stopPlayback()
+                        else void playBoth(sec)
+                      }}
+                      disabled={!hasReferenceAudio || !alexiaUrl || busy}
+                      title="Alexia’s section, then the matching reference"
+                    >
+                      {bothActive ? 'Stop both' : 'Play both'}
+                    </button>
                   </div>
+                  {bothActive && (
+                    <p className="play-phase">
+                      Now: {playing?.phase === 'reference' ? 'reference' : 'Alexia'}
+                    </p>
+                  )}
                 </div>
               )
             })}
@@ -320,10 +453,11 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
             <span className="score red">Red</span> hone this section
           </p>
           <p className="playback-hint">
-            Use <strong>Play Alexia</strong> to hear just that part of her take
-            {isComparison
-              ? ', and Play reference for the matching stretch of your uploaded model recording.'
-              : '. Upload a reference and run Compare to also hear the model side-by-side.'}
+            <strong>Play both</strong> plays Alexia’s section, then automatically the matching
+            reference — easiest way to hear the difference.
+            {isComparison && hasReferenceAudio
+              ? ' You can also play each side alone.'
+              : ' Upload a reference and run Compare to unlock Play reference / Play both.'}
           </p>
         </div>
       )}

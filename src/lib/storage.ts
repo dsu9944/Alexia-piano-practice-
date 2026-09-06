@@ -1,6 +1,7 @@
 import type { AnalysisResult, PieceNotes, Take } from '../types'
 
 const DB_NAME = 'alexia-piano-practice'
+/** v1 stores; optional referenceBlob/referenceFileName added without a version bump (graceful). */
 const DB_VERSION = 1
 const TAKES_STORE = 'takes'
 const NOTES_STORE = 'notes'
@@ -14,6 +15,9 @@ interface TakeRecord {
   blob: Blob
   notes: string
   analysisJson?: string
+  /** Optional — older records omit these; IndexedDB put merges fine. */
+  referenceBlob?: Blob
+  referenceFileName?: string
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -44,6 +48,8 @@ function recordToTake(r: TakeRecord): Take {
     blob: r.blob,
     notes: r.notes,
     analysis: r.analysisJson ? (JSON.parse(r.analysisJson) as AnalysisResult) : undefined,
+    referenceBlob: r.referenceBlob,
+    referenceFileName: r.referenceFileName,
   }
 }
 
@@ -57,6 +63,8 @@ export async function saveTake(take: Take): Promise<void> {
     blob: take.blob,
     notes: take.notes,
     analysisJson: take.analysis ? JSON.stringify(take.analysis) : undefined,
+    referenceBlob: take.referenceBlob,
+    referenceFileName: take.referenceFileName,
   }
   return new Promise((resolve, reject) => {
     const tx = db.transaction(TAKES_STORE, 'readwrite')
@@ -101,7 +109,16 @@ export async function updateTakeNotes(id: string, notes: string): Promise<void> 
   })
 }
 
-export async function updateTakeAnalysis(id: string, analysis: AnalysisResult): Promise<void> {
+export type ReferenceAudioUpdate = {
+  blob: Blob
+  fileName?: string
+}
+
+export async function updateTakeAnalysis(
+  id: string,
+  analysis: AnalysisResult,
+  reference?: ReferenceAudioUpdate,
+): Promise<void> {
   const db = await openDb()
   return new Promise((resolve, reject) => {
     const tx = db.transaction(TAKES_STORE, 'readwrite')
@@ -114,6 +131,10 @@ export async function updateTakeAnalysis(id: string, analysis: AnalysisResult): 
         return
       }
       record.analysisJson = JSON.stringify(analysis)
+      if (reference) {
+        record.referenceBlob = reference.blob
+        record.referenceFileName = reference.fileName
+      }
       store.put(record)
     }
     tx.oncomplete = () => resolve()

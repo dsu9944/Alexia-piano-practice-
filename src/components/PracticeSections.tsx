@@ -29,6 +29,102 @@ function formatSec(n: number): string {
   return round1(n).toFixed(1)
 }
 
+/** Allow digits and at most one decimal point while typing (e.g. "", "12", "12.", "12.5"). */
+function sanitizeSecondsDraft(raw: string): string {
+  let out = ''
+  let sawDot = false
+  for (const ch of raw) {
+    if (ch >= '0' && ch <= '9') {
+      out += ch
+    } else if (ch === '.' && !sawDot) {
+      out += ch
+      sawDot = true
+    }
+  }
+  return out
+}
+
+function parseSecondsDraft(draft: string, fallback: number): number {
+  const trimmed = draft.trim()
+  if (trimmed === '' || trimmed === '.') return fallback
+  const n = Number(trimmed)
+  if (!Number.isFinite(n) || n < 0) return fallback
+  return round1(n)
+}
+
+interface SecondsInputProps {
+  value: number
+  onCommit: (seconds: number) => void
+  readOnly?: boolean
+  disabled?: boolean
+  className?: string
+  title?: string
+}
+
+/**
+ * Keyboard-friendly seconds field: type freely (digits + one decimal), commit on blur.
+ * Locked/auto-chained starts stay readOnly as designed.
+ */
+function SecondsInput({
+  value,
+  onCommit,
+  readOnly = false,
+  disabled = false,
+  className,
+  title,
+}: SecondsInputProps) {
+  const [draft, setDraft] = useState(() => formatSec(value))
+  const [focused, setFocused] = useState(false)
+
+  useEffect(() => {
+    if (!focused) setDraft(formatSec(value))
+  }, [value, focused])
+
+  if (readOnly || disabled) {
+    return (
+      <input
+        type="text"
+        inputMode="decimal"
+        value={formatSec(value)}
+        readOnly={readOnly}
+        disabled={disabled}
+        className={className}
+        title={title}
+      />
+    )
+  }
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      autoComplete="off"
+      value={focused ? draft : formatSec(value)}
+      className={className}
+      title={title}
+      onFocus={(e) => {
+        setFocused(true)
+        setDraft(formatSec(value))
+        e.target.select()
+      }}
+      onChange={(e) => {
+        setDraft(sanitizeSecondsDraft(e.target.value))
+      }}
+      onBlur={() => {
+        const next = parseSecondsDraft(draft, value)
+        setFocused(false)
+        setDraft(formatSec(next))
+        if (next !== round1(value)) onCommit(next)
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.currentTarget.blur()
+        }
+      }}
+    />
+  )
+}
+
 type AlexiaTimes = Record<string, { startSec: number; endSec: number }>
 
 /** Start of section i (i>0) always equals end of i-1. Section 0 start unchanged. */
@@ -397,7 +493,8 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
       <p className="hint">
         YouTube times are saved for this piece (shared). Alexia times are saved for the selected take
         (each recording can differ slightly). Section 1 start is editable; later starts follow the
-        previous end automatically.
+        previous end automatically. Type times with the keyboard (e.g. 12.5) and press Enter or click
+        away to save.
       </p>
 
       {loadError && <p className="error">{loadError}</p>}
@@ -455,10 +552,7 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                         {startLocked && (
                           <span className="locked-hint">from previous end</span>
                         )}
-                        <input
-                          type="number"
-                          min={0}
-                          step={0.1}
+                        <SecondsInput
                           value={section.youtubeStartSec}
                           readOnly={startLocked}
                           className={startLocked ? 'input-readonly' : undefined}
@@ -467,25 +561,17 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                               ? 'Locked: equals previous section’s YouTube end'
                               : undefined
                           }
-                          onChange={(e) => {
-                            if (startLocked) return
-                            updateSection(section.id, {
-                              youtubeStartSec: Number(e.target.value) || 0,
-                            })
-                          }}
+                          onCommit={(seconds) =>
+                            updateSection(section.id, { youtubeStartSec: seconds })
+                          }
                         />
                       </label>
                       <label>
                         End (s)
-                        <input
-                          type="number"
-                          min={0}
-                          step={0.1}
+                        <SecondsInput
                           value={section.youtubeEndSec}
-                          onChange={(e) =>
-                            updateSection(section.id, {
-                              youtubeEndSec: Number(e.target.value) || 0,
-                            })
+                          onCommit={(seconds) =>
+                            updateSection(section.id, { youtubeEndSec: seconds })
                           }
                         />
                       </label>
@@ -525,10 +611,7 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                         {startLocked && (
                           <span className="locked-hint">from previous end</span>
                         )}
-                        <input
-                          type="number"
-                          min={0}
-                          step={0.1}
+                        <SecondsInput
                           value={aStart}
                           disabled={!takeId}
                           readOnly={startLocked}
@@ -538,23 +621,15 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                               ? 'Locked: equals previous section’s Alexia end'
                               : undefined
                           }
-                          onChange={(e) => {
-                            if (startLocked) return
-                            setAlexiaStartFirst(Number(e.target.value) || 0)
-                          }}
+                          onCommit={(seconds) => setAlexiaStartFirst(seconds)}
                         />
                       </label>
                       <label>
                         End (s)
-                        <input
-                          type="number"
-                          min={0}
-                          step={0.1}
+                        <SecondsInput
                           value={aEnd}
                           disabled={!takeId}
-                          onChange={(e) =>
-                            setAlexiaEnd(section.id, Number(e.target.value) || 0)
-                          }
+                          onCommit={(seconds) => setAlexiaEnd(section.id, seconds)}
                         />
                       </label>
                     </div>

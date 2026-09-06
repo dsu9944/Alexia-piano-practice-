@@ -459,7 +459,9 @@ textarea:focus,
   color: #667085;
   font-weight: 600;
   white-space: nowrap;
-  min-width: 5.5rem;
+  min-width: 4.2rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .section-scrubber-time strong {
@@ -486,15 +488,10 @@ textarea:focus,
   cursor: not-allowed;
 }
 
-.section-scrubber-actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0.3rem;
-}
-
-.section-scrubber-actions .btn {
-  width: 100%;
+.section-scrubber-row .btn {
+  flex: 0 0 auto;
   margin-top: 0;
+  min-width: 4.4rem;
 }
 
 .footer {

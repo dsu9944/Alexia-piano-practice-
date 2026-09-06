@@ -169,22 +169,24 @@ interface SectionScrubberProps {
   endSec: number
   disabled?: boolean
   onSeek: (sec: number) => void
-  onPlayFromStart: () => void
-  onPlayFromHere: (fromSec: number) => void
+  onPlay: (fromSec: number) => void
+  onStop: () => void
+  getCurrentTime: () => number
   playLabel: string
 }
 
 /**
- * Range scrubber locked to a section’s start→end. Drag seeks the player;
- * play from section start or from the scrub thumb.
+ * Mini player for one section clip: Play/Stop + scrubber.
+ * Drag sets position within start→end; Play starts from the thumb (default: section start).
  */
 function SectionScrubber({
   startSec,
   endSec,
   disabled = false,
   onSeek,
-  onPlayFromStart,
-  onPlayFromHere,
+  onPlay,
+  onStop,
+  getCurrentTime,
   playLabel,
 }: SectionScrubberProps) {
   const valid =
@@ -192,14 +194,43 @@ function SectionScrubber({
   const lo = valid ? round1(startSec) : 0
   const hi = valid ? round1(endSec) : 0.1
   const [pos, setPos] = useState(lo)
+  const [playing, setPlaying] = useState(false)
+  const scrubbingRef = useRef(false)
+  const posRef = useRef(pos)
+  posRef.current = pos
 
   useEffect(() => {
     setPos((prev) => {
       if (!valid) return lo
-      const clamped = Math.min(hi, Math.max(lo, round1(prev)))
-      return clamped
+      // Keep thumb in range; default to section start when previously unset/out of range.
+      if (prev < lo - 0.05 || prev > hi + 0.05) return lo
+      return Math.min(hi, Math.max(lo, round1(prev)))
     })
+    if (!valid) setPlaying(false)
   }, [lo, hi, valid])
+
+  const inactive = disabled || !valid
+
+  // Follow the live player while this clip is playing.
+  useEffect(() => {
+    if (!playing || inactive) return
+    const id = window.setInterval(() => {
+      if (scrubbingRef.current) return
+      const t = round1(getCurrentTime())
+      if (t >= hi - 0.05) {
+        setPos(hi)
+        setPlaying(false)
+        return
+      }
+      // Another control moved the shared player outside this section.
+      if (t < lo - 0.25 || t > hi + 0.25) {
+        setPlaying(false)
+        return
+      }
+      setPos(Math.min(hi, Math.max(lo, t)))
+    }, 100)
+    return () => window.clearInterval(id)
+  }, [playing, inactive, lo, hi, getCurrentTime])
 
   const seek = (raw: number) => {
     if (!valid || disabled) return
@@ -208,24 +239,36 @@ function SectionScrubber({
     onSeek(next)
   }
 
-  const inactive = disabled || !valid
+  const togglePlay = () => {
+    if (inactive) return
+    if (playing) {
+      onStop()
+      setPlaying(false)
+      return
+    }
+    const from = round1(Math.min(hi, Math.max(lo, posRef.current)))
+    // If thumb is at/near the end, restart from section start.
+    const startFrom = from >= hi - 0.05 ? lo : from
+    setPos(startFrom)
+    onPlay(startFrom)
+    setPlaying(true)
+  }
+
+  const rel = valid ? round1(Math.max(0, Math.min(hi, pos) - lo)) : 0
+  const dur = valid ? round1(Math.max(0, hi - lo)) : 0
 
   return (
     <div className={`section-scrubber${inactive ? ' is-disabled' : ''}`}>
       <div className="section-scrubber-row">
-        <span className="section-scrubber-time" aria-live="polite">
-          {valid ? (
-            <>
-              <strong>{formatSec(pos)}s</strong>
-              <span className="section-scrubber-range">
-                {' '}
-                ({formatSec(lo)}–{formatSec(hi)})
-              </span>
-            </>
-          ) : (
-            'Set start & end'
-          )}
-        </span>
+        <button
+          type="button"
+          className={`btn tiny ${playing ? 'danger' : 'primary'}`}
+          disabled={inactive}
+          aria-label={playing ? `Stop ${playLabel} clip` : `Play ${playLabel} clip`}
+          onClick={togglePlay}
+        >
+          {playing ? '■ Stop' : '▶ Play'}
+        </button>
         <input
           type="range"
           min={lo}
@@ -234,26 +277,27 @@ function SectionScrubber({
           value={valid ? Math.min(hi, Math.max(lo, pos)) : lo}
           disabled={inactive}
           aria-label={`${playLabel} section scrubber`}
+          onPointerDown={() => {
+            scrubbingRef.current = true
+          }}
+          onPointerUp={() => {
+            scrubbingRef.current = false
+          }}
+          onPointerCancel={() => {
+            scrubbingRef.current = false
+          }}
           onChange={(e) => seek(Number(e.target.value))}
         />
-      </div>
-      <div className="section-scrubber-actions">
-        <button
-          type="button"
-          className="btn tiny primary"
-          disabled={inactive}
-          onClick={onPlayFromStart}
-        >
-          ▶ Start
-        </button>
-        <button
-          type="button"
-          className="btn tiny secondary"
-          disabled={inactive}
-          onClick={() => onPlayFromHere(pos)}
-        >
-          ▶ Here
-        </button>
+        <span className="section-scrubber-time" aria-live="polite">
+          {valid ? (
+            <>
+              <strong>{formatSec(rel)}</strong>
+              <span className="section-scrubber-range"> / {formatSec(dur)}</span>
+            </>
+          ) : (
+            'Set start & end'
+          )}
+        </span>
       </div>
     </div>
   )
@@ -770,8 +814,9 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                       endSec={section.youtubeEndSec}
                       playLabel="YouTube"
                       onSeek={(sec) => youtubeRef.current?.seekTo(sec)}
-                      onPlayFromStart={() => playYtClip(section)}
-                      onPlayFromHere={(from) => playYtClip(section, from)}
+                      onPlay={(from) => playYtClip(section, from)}
+                      onStop={() => youtubeRef.current?.stopClip()}
+                      getCurrentTime={() => youtubeRef.current?.getCurrentTime() ?? 0}
                     />
                   </div>
 
@@ -833,12 +878,11 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                       disabled={!takeId}
                       playLabel="Alexia"
                       onSeek={(sec) => takeRef.current?.seekTo(sec)}
-                      onPlayFromStart={() =>
-                        playAlexiaClip(section.label, aStart, aEnd)
-                      }
-                      onPlayFromHere={(from) =>
+                      onPlay={(from) =>
                         playAlexiaClip(section.label, aStart, aEnd, from)
                       }
+                      onStop={() => takeRef.current?.stopClip()}
+                      getCurrentTime={() => takeRef.current?.getCurrentTime() ?? 0}
                     />
                   </div>
                 </div>

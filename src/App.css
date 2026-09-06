@@ -405,3 +405,27 @@ textarea:focus,
 }
 
 .footer p { margin: 0; }
+
+.continuous-tip {
+  background: #f3f0ea;
+  border-color: #ddd4c6;
+  color: #5a4e3c;
+}
+
+.locked-hint {
+  display: inline-block;
+  margin-left: 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: #8a7a64;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.input-readonly,
+input.input-readonly {
+  background: #f3f1ec;
+  color: #5a6472;
+  cursor: default;
+  border-color: #e0d8cc;
+}

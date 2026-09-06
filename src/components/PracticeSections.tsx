@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type RefObject } from 'react'
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import {
   getPiecePracticeSections,
   getTakeSectionTimes,
@@ -31,19 +31,52 @@ function formatSec(n: number): string {
 
 type AlexiaTimes = Record<string, { startSec: number; endSec: number }>
 
+/** Start of section i (i>0) always equals end of i-1. Section 0 start unchanged. */
+function makeYtContinuous(sections: PracticeSection[]): PracticeSection[] {
+  if (sections.length === 0) return sections
+  const next = sections.map((s) => ({ ...s }))
+  for (let i = 1; i < next.length; i++) {
+    next[i].youtubeStartSec = next[i - 1].youtubeEndSec
+    if (next[i].youtubeEndSec < next[i].youtubeStartSec) {
+      next[i].youtubeEndSec = round1(next[i].youtubeStartSec + 0.5)
+    }
+  }
+  return next
+}
+
+/** Same continuity rule for Alexia take times, keyed by section order. */
+function makeAlexiaContinuous(sections: PracticeSection[], alexia: AlexiaTimes): AlexiaTimes {
+  if (sections.length === 0) return alexia
+  const next: AlexiaTimes = { ...alexia }
+  for (let i = 1; i < sections.length; i++) {
+    const prevId = sections[i - 1].id
+    const id = sections[i].id
+    const prevEnd = next[prevId]?.endSec
+    if (prevEnd === undefined) continue
+    const cur = next[id] ?? { startSec: prevEnd, endSec: round1(prevEnd + 0.5) }
+    const startSec = prevEnd
+    const endSec = Math.max(cur.endSec, round1(startSec + 0.5))
+    next[id] = { startSec: round1(startSec), endSec: round1(endSec) }
+  }
+  return next
+}
+
 export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props) {
   const [sections, setSections] = useState<PracticeSection[]>([])
   const [alexia, setAlexia] = useState<AlexiaTimes>({})
   const [status, setStatus] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const sectionsRef = useRef(sections)
+  sectionsRef.current = sections
 
   const persistPiece = useCallback(
     async (next: PracticeSection[]) => {
-      setSections(next)
+      const continuous = makeYtContinuous(next)
+      setSections(continuous)
       try {
         await savePiecePracticeSections({
           pieceId,
-          sections: next,
+          sections: continuous,
           updatedAt: Date.now(),
         })
       } catch (err) {
@@ -55,13 +88,15 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
   )
 
   const persistAlexia = useCallback(
-    async (next: AlexiaTimes) => {
-      setAlexia(next)
+    async (next: AlexiaTimes, sectionOrder?: PracticeSection[]) => {
+      const order = sectionOrder ?? sectionsRef.current
+      const continuous = makeAlexiaContinuous(order, next)
+      setAlexia(continuous)
       if (!takeId) return
       try {
         await saveTakeSectionTimes({
           takeId,
-          bySection: next,
+          bySection: continuous,
           updatedAt: Date.now(),
         })
       } catch (err) {
@@ -75,10 +110,28 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
   useEffect(() => {
     let cancelled = false
     setLoadError(null)
+    setSections([])
     void (async () => {
       try {
         const row = await getPiecePracticeSections(pieceId)
-        if (!cancelled) setSections(row?.sections ?? [])
+        if (cancelled) return
+        const loaded = row?.sections ?? []
+        const continuous = makeYtContinuous(loaded)
+        setSections(continuous)
+        if (
+          loaded.length > 0 &&
+          JSON.stringify(loaded) !== JSON.stringify(continuous)
+        ) {
+          try {
+            await savePiecePracticeSections({
+              pieceId,
+              sections: continuous,
+              updatedAt: Date.now(),
+            })
+          } catch (err) {
+            console.error(err)
+          }
+        }
       } catch (err) {
         console.error(err)
         if (!cancelled) setLoadError('Could not load practice sections for this piece.')
@@ -98,7 +151,21 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     void (async () => {
       try {
         const row = await getTakeSectionTimes(takeId)
-        if (!cancelled) setAlexia(row?.bySection ?? {})
+        if (cancelled) return
+        const loaded = row?.bySection ?? {}
+        const continuous = makeAlexiaContinuous(sectionsRef.current, loaded)
+        setAlexia(continuous)
+        if (JSON.stringify(continuous) !== JSON.stringify(loaded)) {
+          try {
+            await saveTakeSectionTimes({
+              takeId,
+              bySection: continuous,
+              updatedAt: Date.now(),
+            })
+          } catch (err) {
+            console.error(err)
+          }
+        }
       } catch (err) {
         console.error(err)
         if (!cancelled) setAlexia({})
@@ -109,53 +176,154 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     }
   }, [takeId])
 
+  // Re-apply Alexia continuity when section order is ready (covers load races).
+  useEffect(() => {
+    if (!takeId || sections.length < 2) return
+    setAlexia((prev) => {
+      const continuous = makeAlexiaContinuous(sections, prev)
+      if (JSON.stringify(continuous) === JSON.stringify(prev)) return prev
+      void saveTakeSectionTimes({
+        takeId,
+        bySection: continuous,
+        updatedAt: Date.now(),
+      }).catch((err) => console.error(err))
+      return continuous
+    })
+  }, [takeId, sections])
+
   const addSection = () => {
     const n = sections.length + 1
+    const prev = sections[sections.length - 1]
+    const ytStart = prev ? prev.youtubeEndSec : 0
+    const ytEnd = round1(ytStart + 10)
     const next: PracticeSection = {
       id: newSectionId(),
       label: `Section ${n}`,
-      youtubeStartSec: 0,
-      youtubeEndSec: 10,
+      youtubeStartSec: ytStart,
+      youtubeEndSec: ytEnd,
     }
-    void persistPiece([...sections, next])
-    setStatus(`Added “${next.label}”. Mark YouTube and Alexia times for this bit.`)
+    const nextSections = [...sections, next]
+    void persistPiece(nextSections)
+
+    if (takeId && prev) {
+      const prevA = alexia[prev.id]
+      const aStart = prevA?.endSec ?? 0
+      void persistAlexia(
+        {
+          ...alexia,
+          [next.id]: { startSec: round1(aStart), endSec: round1(aStart + 10) },
+        },
+        nextSections,
+      )
+    }
+
+    setStatus(`Added “${next.label}”. It starts where the last section ended.`)
   }
 
   const updateSection = (id: string, patch: Partial<PracticeSection>) => {
+    const idx = sections.findIndex((s) => s.id === id)
+    if (idx < 0) return
+
     const next = sections.map((s) => (s.id === id ? { ...s, ...patch } : s))
+
+    // Starts for section 2+ are driven by previous end — ignore direct start edits
+    if (idx > 0 && patch.youtubeStartSec !== undefined) {
+      next[idx] = {
+        ...next[idx],
+        youtubeStartSec: next[idx - 1].youtubeEndSec,
+      }
+    }
+
+    // When end of section i changes, start of i+1 follows (makeYtContinuous also does this)
+    if (patch.youtubeEndSec !== undefined && idx + 1 < next.length) {
+      next[idx + 1] = {
+        ...next[idx + 1],
+        youtubeStartSec: next[idx].youtubeEndSec,
+      }
+    }
+
     void persistPiece(next)
   }
 
   const deleteSection = (id: string) => {
     const next = sections.filter((s) => s.id !== id)
     void persistPiece(next)
-    if (takeId && alexia[id]) {
+    if (takeId) {
       const { [id]: _, ...rest } = alexia
-      void persistAlexia(rest)
+      void persistAlexia(rest, next)
     }
   }
 
-  const setAlexiaTimes = (sectionId: string, startSec: number, endSec: number) => {
+  const setAlexiaEnd = (sectionId: string, endSec: number) => {
     if (!takeId) {
       setStatus('Select or record a take first, then mark Alexia times.')
       return
     }
-    void persistAlexia({
+    const idx = sections.findIndex((s) => s.id === sectionId)
+    if (idx < 0) return
+
+    const startSec =
+      idx === 0
+        ? (alexia[sectionId]?.startSec ?? 0)
+        : (alexia[sections[idx - 1].id]?.endSec ?? alexia[sectionId]?.startSec ?? 0)
+
+    const next: AlexiaTimes = {
       ...alexia,
       [sectionId]: { startSec: round1(startSec), endSec: round1(endSec) },
+    }
+
+    if (idx + 1 < sections.length) {
+      const nextId = sections[idx + 1].id
+      const nextCur = next[nextId] ?? {
+        startSec: endSec,
+        endSec: round1(endSec + 0.5),
+      }
+      next[nextId] = {
+        startSec: round1(endSec),
+        endSec: round1(Math.max(nextCur.endSec, endSec + 0.5)),
+      }
+    }
+
+    void persistAlexia(next)
+  }
+
+  const setAlexiaStartFirst = (startSec: number) => {
+    if (!takeId) {
+      setStatus('Select or record a take first, then mark Alexia times.')
+      return
+    }
+    if (sections.length === 0) return
+    const firstId = sections[0].id
+    const cur = alexia[firstId] ?? { startSec: 0, endSec: 10 }
+    const end = Math.max(cur.endSec, round1(startSec + 0.5))
+    void persistAlexia({
+      ...alexia,
+      [firstId]: { startSec: round1(startSec), endSec: round1(end) },
     })
   }
 
   const markYt = (section: PracticeSection, which: 'start' | 'end') => {
+    const idx = sections.findIndex((s) => s.id === section.id)
+    if (idx < 0) return
     const t = round1(youtubeRef.current?.getCurrentTime() ?? 0)
+
     if (which === 'start') {
+      if (idx > 0) {
+        setStatus('Start is locked to the previous section’s end.')
+        return
+      }
       const end = Math.max(section.youtubeEndSec, t + 0.5)
       updateSection(section.id, { youtubeStartSec: t, youtubeEndSec: end })
       setStatus(`YouTube start marked at ${formatSec(t)}s`)
     } else {
-      const start = Math.min(section.youtubeStartSec, Math.max(0, t - 0.5))
-      updateSection(section.id, { youtubeStartSec: start, youtubeEndSec: t })
-      setStatus(`YouTube end marked at ${formatSec(t)}s`)
+      updateSection(section.id, { youtubeEndSec: t })
+      if (idx + 1 < sections.length) {
+        setStatus(
+          `YouTube end marked at ${formatSec(t)}s — next section starts there too.`,
+        )
+      } else {
+        setStatus(`YouTube end marked at ${formatSec(t)}s`)
+      }
     }
   }
 
@@ -164,16 +332,26 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
       setStatus('Select or record a take first.')
       return
     }
+    const idx = sections.findIndex((s) => s.id === sectionId)
+    if (idx < 0) return
     const t = round1(takeRef.current?.getCurrentTime() ?? 0)
-    const cur = alexia[sectionId] ?? { startSec: 0, endSec: 10 }
+
     if (which === 'start') {
-      const end = Math.max(cur.endSec, t + 0.5)
-      setAlexiaTimes(sectionId, t, end)
+      if (idx > 0) {
+        setStatus('Start is locked to the previous section’s end.')
+        return
+      }
+      setAlexiaStartFirst(t)
       setStatus(`Alexia start marked at ${formatSec(t)}s`)
     } else {
-      const start = Math.min(cur.startSec, Math.max(0, t - 0.5))
-      setAlexiaTimes(sectionId, start, t)
-      setStatus(`Alexia end marked at ${formatSec(t)}s`)
+      setAlexiaEnd(sectionId, t)
+      if (idx + 1 < sections.length) {
+        setStatus(
+          `Alexia end marked at ${formatSec(t)}s — next section starts there too.`,
+        )
+      } else {
+        setStatus(`Alexia end marked at ${formatSec(t)}s`)
+      }
     }
   }
 
@@ -200,15 +378,26 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     )
   }
 
+  const alexiaStartFor = (index: number, sectionId: string): number => {
+    if (index === 0) return alexia[sectionId]?.startSec ?? 0
+    const prevId = sections[index - 1]?.id
+    if (prevId && alexia[prevId]) return alexia[prevId].endSec
+    return alexia[sectionId]?.startSec ?? 0
+  }
+
   return (
     <div className="practice-sections card">
       <h2>Practice sections</h2>
       <p className="compare-tip">
         Mark the same musical bit on YouTube and on Alexia’s take, then play each to compare by ear.
       </p>
+      <p className="compare-tip continuous-tip">
+        Each section starts where the last one ended.
+      </p>
       <p className="hint">
         YouTube times are saved for this piece (shared). Alexia times are saved for the selected take
-        (each recording can differ slightly).
+        (each recording can differ slightly). Section 1 start is editable; later starts follow the
+        previous end automatically.
       </p>
 
       {loadError && <p className="error">{loadError}</p>}
@@ -231,9 +420,11 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
         <p className="hint">No sections yet. Add one for the opening phrase, a tricky bar, etc.</p>
       ) : (
         <ul className="section-edit-list">
-          {sections.map((section) => {
-            const a = alexia[section.id] ?? { startSec: 0, endSec: 0 }
-            const hasAlexia = takeId && alexia[section.id] && a.endSec > a.startSec
+          {sections.map((section, index) => {
+            const startLocked = index > 0
+            const aStart = alexiaStartFor(index, section.id)
+            const aEnd = alexia[section.id]?.endSec ?? 0
+            const hasAlexia = Boolean(takeId && alexia[section.id] && aEnd > aStart)
             return (
               <li key={section.id} className="section-edit-card">
                 <div className="section-edit-top">
@@ -261,16 +452,27 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                     <div className="time-inputs">
                       <label>
                         Start (s)
+                        {startLocked && (
+                          <span className="locked-hint">from previous end</span>
+                        )}
                         <input
                           type="number"
                           min={0}
                           step={0.1}
                           value={section.youtubeStartSec}
-                          onChange={(e) =>
+                          readOnly={startLocked}
+                          className={startLocked ? 'input-readonly' : undefined}
+                          title={
+                            startLocked
+                              ? 'Locked: equals previous section’s YouTube end'
+                              : undefined
+                          }
+                          onChange={(e) => {
+                            if (startLocked) return
                             updateSection(section.id, {
                               youtubeStartSec: Number(e.target.value) || 0,
                             })
-                          }
+                          }}
                         />
                       </label>
                       <label>
@@ -289,13 +491,15 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                       </label>
                     </div>
                     <div className="mark-row">
-                      <button
-                        type="button"
-                        className="btn tiny secondary"
-                        onClick={() => markYt(section, 'start')}
-                      >
-                        Mark YouTube start
-                      </button>
+                      {!startLocked && (
+                        <button
+                          type="button"
+                          className="btn tiny secondary"
+                          onClick={() => markYt(section, 'start')}
+                        >
+                          Mark YouTube start
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="btn tiny secondary"
@@ -318,19 +522,26 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                     <div className="time-inputs">
                       <label>
                         Start (s)
+                        {startLocked && (
+                          <span className="locked-hint">from previous end</span>
+                        )}
                         <input
                           type="number"
                           min={0}
                           step={0.1}
-                          value={a.startSec}
+                          value={aStart}
                           disabled={!takeId}
-                          onChange={(e) =>
-                            setAlexiaTimes(
-                              section.id,
-                              Number(e.target.value) || 0,
-                              a.endSec || Number(e.target.value) || 0,
-                            )
+                          readOnly={startLocked}
+                          className={startLocked ? 'input-readonly' : undefined}
+                          title={
+                            startLocked
+                              ? 'Locked: equals previous section’s Alexia end'
+                              : undefined
                           }
+                          onChange={(e) => {
+                            if (startLocked) return
+                            setAlexiaStartFirst(Number(e.target.value) || 0)
+                          }}
                         />
                       </label>
                       <label>
@@ -339,27 +550,25 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                           type="number"
                           min={0}
                           step={0.1}
-                          value={a.endSec}
+                          value={aEnd}
                           disabled={!takeId}
                           onChange={(e) =>
-                            setAlexiaTimes(
-                              section.id,
-                              a.startSec || 0,
-                              Number(e.target.value) || 0,
-                            )
+                            setAlexiaEnd(section.id, Number(e.target.value) || 0)
                           }
                         />
                       </label>
                     </div>
                     <div className="mark-row">
-                      <button
-                        type="button"
-                        className="btn tiny secondary"
-                        disabled={!takeId}
-                        onClick={() => markAlexia(section.id, 'start')}
-                      >
-                        Mark Alexia start
-                      </button>
+                      {!startLocked && (
+                        <button
+                          type="button"
+                          className="btn tiny secondary"
+                          disabled={!takeId}
+                          onClick={() => markAlexia(section.id, 'start')}
+                        >
+                          Mark Alexia start
+                        </button>
+                      )}
                       <button
                         type="button"
                         className="btn tiny secondary"

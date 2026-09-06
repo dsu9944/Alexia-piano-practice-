@@ -335,7 +335,7 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
           <div className={`mode-banner ${display.mode}`}>
             {display.mode === 'solo'
               ? 'Solo consistency check — not a YouTube match'
-              : 'Compared to your uploaded reference'}
+              : 'Compared to reference — sections defined on the model, DTW-aligned to Alexia'}
           </div>
           <p className="summary">{display.summary}</p>
           {display.honeSections.length > 0 && (
@@ -383,7 +383,11 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
                 >
                   <div className="section-top">
                     <strong>{sec.label}</strong>
-                    <span className="time">{formatRange(sec.startSec, sec.endSec)}</span>
+                    <span className="time">
+                      {isComparison && refStart != null && refEnd != null
+                        ? `Alexia ${formatRange(sec.startSec, sec.endSec)} · Ref ${formatRange(refStart, refEnd)}`
+                        : formatRange(sec.startSec, sec.endSec)}
+                    </span>
                   </div>
                   <div className="score-row">
                     <span className={scoreClass(sec.tempoScore)}>Tempo {sec.tempoScore}</span>
@@ -453,10 +457,10 @@ export function ComparisonView({ take, onAnalyzed }: Props) {
             <span className="score red">Red</span> hone this section
           </p>
           <p className="playback-hint">
-            <strong>Play both</strong> plays Alexia’s section, then automatically the matching
-            reference — easiest way to hear the difference.
+            <strong>Play both</strong> plays the same musical section: Alexia first (DTW-aligned),
+            then the reference phrase it was compared to.
             {isComparison && hasReferenceAudio
-              ? ' You can also play each side alone.'
+              ? ' Sections are defined on the reference so tempo differences still line up.'
               : ' Upload a reference and run Compare to unlock Play reference / Play both.'}
           </p>
         </div>

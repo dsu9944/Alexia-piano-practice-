@@ -3,6 +3,8 @@ import type { AnalysisResult, SectionAnalysis, SectionScore } from '../types'
 const SECTION_COUNT = 6
 const FRAME_SIZE = 2048
 const HOP_SIZE = 512
+/** Downsample length for DTW (balance quality vs browser CPU). */
+const DTW_POINTS = 96
 
 export async function decodeAudioBlob(blob: Blob): Promise<AudioBuffer> {
   const ctx = new AudioContext()
@@ -54,6 +56,20 @@ function onsetStrength(rms: Float32Array): Float32Array {
   return out
 }
 
+function smoothEnvelope(arr: Float32Array, radius: number): Float32Array {
+  const out = new Float32Array(arr.length)
+  for (let i = 0; i < arr.length; i++) {
+    let sum = 0
+    let c = 0
+    for (let j = Math.max(0, i - radius); j <= Math.min(arr.length - 1, i + radius); j++) {
+      sum += arr[j]
+      c++
+    }
+    out[i] = c > 0 ? sum / c : 0
+  }
+  return out
+}
+
 interface SectionMetrics {
   startSec: number
   endSec: number
@@ -73,7 +89,6 @@ function sectionMetrics(
   let rmsCount = 0
   let onsetSum = 0
   const onsetTimes: number[] = []
-  // Adaptive peak threshold from section onset mean
   let onsetMean = 0
   let onsetCount = 0
   for (let i = 0; i < times.length; i++) {
@@ -89,12 +104,15 @@ function sectionMetrics(
     rmsSum += rms[i]
     rmsCount++
     onsetSum += onsets[i]
-    if (onsets[i] > threshold && (i === 0 || onsets[i] >= onsets[i - 1]) && (i === onsets.length - 1 || onsets[i] >= onsets[i + 1])) {
+    if (
+      onsets[i] > threshold &&
+      (i === 0 || onsets[i] >= onsets[i - 1]) &&
+      (i === onsets.length - 1 || onsets[i] >= onsets[i + 1])
+    ) {
       onsetTimes.push(times[i])
     }
   }
   const duration = Math.max(0.001, endSec - startSec)
-  // Tempo proxy: onset density (onsets per second) weighted with energy flux
   const density = onsetTimes.length / duration
   const flux = onsetSum / Math.max(1, rmsCount) / duration
   const tempoProxy = density * 0.7 + flux * 30
@@ -140,69 +158,6 @@ function labelFor(i: number, n: number): string {
   return `Section ${i + 1}`
 }
 
-/**
- * Simple duration-normalized alignment: stretch reference timeline to student duration,
- * then compare matching time windows. Good enough MVP when performances are similar length.
- */
-function alignSections(
-  studentDuration: number,
-  refDuration: number,
-  count: number,
-): { sStart: number; sEnd: number; rStart: number; rEnd: number }[] {
-  const out = []
-  for (let i = 0; i < count; i++) {
-    out.push({
-      sStart: (i / count) * studentDuration,
-      sEnd: ((i + 1) / count) * studentDuration,
-      rStart: (i / count) * refDuration,
-      rEnd: ((i + 1) / count) * refDuration,
-    })
-  }
-  return out
-}
-
-/**
- * Lightweight DTW on coarse RMS envelopes to refine section boundaries on the reference.
- * Returns mapping of student section index -> refined ref [start, end] in seconds.
- */
-function dtwRefineRefWindows(
-  studentRms: Float32Array,
-  studentTimes: Float32Array,
-  refRms: Float32Array,
-  refTimes: Float32Array,
-  studentDuration: number,
-  count: number,
-): { rStart: number; rEnd: number }[] {
-  // Downsample to ~80 points for DTW
-  const N = 80
-  const s = downsample(studentRms, N)
-  const r = downsample(refRms, N)
-  const path = dtwPath(s, r)
-
-  const windows: { rStart: number; rEnd: number }[] = []
-  for (let i = 0; i < count; i++) {
-    const s0 = Math.floor((i / count) * (N - 1))
-    const s1 = Math.floor(((i + 1) / count) * (N - 1))
-    const matched = path.filter(([si]) => si >= s0 && si <= s1).map(([, ri]) => ri)
-    if (matched.length === 0) {
-      windows.push({
-        rStart: (i / count) * (refTimes[refTimes.length - 1] || studentDuration),
-        rEnd: ((i + 1) / count) * (refTimes[refTimes.length - 1] || studentDuration),
-      })
-      continue
-    }
-    const rMin = Math.min(...matched)
-    const rMax = Math.max(...matched)
-    const t0 = refTimes[Math.min(refTimes.length - 1, Math.floor((rMin / (N - 1)) * (refTimes.length - 1)))]
-    const t1 = refTimes[Math.min(refTimes.length - 1, Math.floor((rMax / (N - 1)) * (refTimes.length - 1)))]
-    windows.push({ rStart: Math.min(t0, t1), rEnd: Math.max(t0, t1) + 0.001 })
-  }
-  // silence unused student vars warning by referencing
-  void studentTimes
-  void studentDuration
-  return windows
-}
-
 function downsample(arr: Float32Array, n: number): Float32Array {
   const out = new Float32Array(n)
   if (arr.length === 0) return out
@@ -217,7 +172,17 @@ function downsample(arr: Float32Array, n: number): Float32Array {
     }
     out[i] = c > 0 ? sum / c : 0
   }
-  // Normalize
+  const max = Math.max(...out, 1e-9)
+  for (let i = 0; i < n; i++) out[i] /= max
+  return out
+}
+
+/** Combined onset + energy feature for alignment (normalized 0–1). */
+function alignmentFeature(rms: Float32Array, onsets: Float32Array, n: number): Float32Array {
+  const r = downsample(rms, n)
+  const o = downsample(onsets, n)
+  const out = new Float32Array(n)
+  for (let i = 0; i < n; i++) out[i] = 0.45 * r[i] + 0.55 * o[i]
   const max = Math.max(...out, 1e-9)
   for (let i = 0; i < n; i++) out[i] /= max
   return out
@@ -237,7 +202,6 @@ function dtwPath(a: Float32Array, b: Float32Array): [number, number][] {
       cost[i][j] = d + Math.min(cost[i - 1][j], cost[i][j - 1], cost[i - 1][j - 1])
     }
   }
-  // Backtrack
   const path: [number, number][] = []
   let i = n - 1
   let j = m - 1
@@ -261,6 +225,216 @@ function dtwPath(a: Float32Array, b: Float32Array): [number, number][] {
   }
   path.reverse()
   return path
+}
+
+/**
+ * Map a reference time (seconds) → student time via DTW path.
+ * path entries are [studentFrame, refFrame] in downsampled index space.
+ */
+function mapRefTimeToStudent(
+  refSec: number,
+  path: [number, number][],
+  refDuration: number,
+  studentDuration: number,
+  nRef: number,
+  nStudent: number,
+): number {
+  if (refDuration <= 0) return 0
+  const target = Math.max(0, Math.min(nRef - 1, (refSec / refDuration) * (nRef - 1)))
+  let bestSi = 0
+  let bestDist = Infinity
+  let sumSi = 0
+  let count = 0
+  for (const [si, ri] of path) {
+    const d = Math.abs(ri - target)
+    if (d < bestDist) {
+      bestDist = d
+      bestSi = si
+    }
+    if (d <= 1.5) {
+      sumSi += si
+      count++
+    }
+  }
+  const si = count > 0 ? sumSi / count : bestSi
+  const t = (si / Math.max(1, nStudent - 1)) * studentDuration
+  return Math.max(0, Math.min(studentDuration, t))
+}
+
+/**
+ * Define phrase-like section boundaries on the REFERENCE timeline.
+ * Prefer energy valleys / onset lulls; fall back to equal cumulative-onset quantiles
+ * so sections follow musical activity rather than wall-clock alone.
+ * Returns sorted boundary times including 0 and duration (length = count + 1).
+ */
+function referenceSectionBoundaries(
+  times: Float32Array,
+  rms: Float32Array,
+  onsets: Float32Array,
+  duration: number,
+  count: number,
+): number[] {
+  if (duration <= 0.05 || times.length < 4) {
+    return Array.from({ length: count + 1 }, (_, i) => (i / count) * Math.max(duration, 0.001))
+  }
+
+  const smoothRms = smoothEnvelope(rms, 4)
+  const smoothOnsets = smoothEnvelope(onsets, 3)
+  const meanRms = smoothRms.reduce((a, b) => a + b, 0) / smoothRms.length
+  const meanOnset = smoothOnsets.reduce((a, b) => a + b, 0) / Math.max(1, smoothOnsets.length)
+
+  const minGap = Math.max(0.6, duration / (count * 2.2))
+  const candidates: { t: number; score: number }[] = []
+
+  for (let i = 2; i < times.length - 2; i++) {
+    const t = times[i]
+    if (t < minGap || t > duration - minGap) continue
+    const isValley =
+      smoothRms[i] <= smoothRms[i - 1] &&
+      smoothRms[i] <= smoothRms[i + 1] &&
+      smoothRms[i] <= meanRms * 0.85
+    const onsetLull = smoothOnsets[i] <= meanOnset * 0.55
+    if (!isValley && !onsetLull) continue
+    // Prefer deeper valleys / quieter lulls
+    const depth = meanRms > 1e-9 ? 1 - smoothRms[i] / meanRms : 0
+    const lull = meanOnset > 1e-9 ? 1 - smoothOnsets[i] / Math.max(meanOnset, 1e-9) : 0
+    candidates.push({ t, score: depth * 0.6 + lull * 0.4 })
+  }
+
+  // Greedy pick of well-spaced high-score valleys
+  candidates.sort((a, b) => b.score - a.score)
+  const picked: number[] = []
+  for (const c of candidates) {
+    if (picked.every((p) => Math.abs(p - c.t) >= minGap)) {
+      picked.push(c.t)
+    }
+    if (picked.length >= count * 3) break
+  }
+  picked.sort((a, b) => a - b)
+
+  let interiors: number[]
+  if (picked.length >= count - 1) {
+    // Choose count-1 boundaries closest to ideal equal-ish spacing by musical progress
+    interiors = pickEvenlyFromCandidates(picked, count - 1, duration)
+  } else {
+    // Fallback: equal cumulative onset-energy quantiles on the reference
+    interiors = cumulativeOnsetBoundaries(times, onsets, duration, count - 1)
+  }
+
+  const bounds = [0, ...interiors, duration]
+  // Enforce monotonic + minimum width
+  const minWidth = Math.max(0.35, duration / (count * 4))
+  for (let i = 1; i < bounds.length; i++) {
+    if (bounds[i] < bounds[i - 1] + minWidth) {
+      bounds[i] = Math.min(duration, bounds[i - 1] + minWidth)
+    }
+  }
+  bounds[bounds.length - 1] = duration
+  return bounds
+}
+
+function pickEvenlyFromCandidates(candidates: number[], need: number, duration: number): number[] {
+  if (need <= 0) return []
+  if (candidates.length <= need) return candidates.slice()
+  const targets = Array.from({ length: need }, (_, i) => ((i + 1) / (need + 1)) * duration)
+  const used = new Set<number>()
+  const out: number[] = []
+  for (const target of targets) {
+    let bestIdx = -1
+    let bestDist = Infinity
+    for (let i = 0; i < candidates.length; i++) {
+      if (used.has(i)) continue
+      const d = Math.abs(candidates[i] - target)
+      if (d < bestDist) {
+        bestDist = d
+        bestIdx = i
+      }
+    }
+    if (bestIdx >= 0) {
+      used.add(bestIdx)
+      out.push(candidates[bestIdx])
+    }
+  }
+  return out.sort((a, b) => a - b)
+}
+
+function cumulativeOnsetBoundaries(
+  times: Float32Array,
+  onsets: Float32Array,
+  duration: number,
+  need: number,
+): number[] {
+  if (need <= 0) return []
+  const cum = new Float32Array(onsets.length)
+  let total = 0
+  for (let i = 0; i < onsets.length; i++) {
+    total += onsets[i]
+    cum[i] = total
+  }
+  if (total < 1e-9) {
+    return Array.from({ length: need }, (_, i) => ((i + 1) / (need + 1)) * duration)
+  }
+  const out: number[] = []
+  for (let k = 1; k <= need; k++) {
+    const target = (k / (need + 1)) * total
+    let idx = 0
+    while (idx < cum.length - 1 && cum[idx] < target) idx++
+    out.push(times[idx] ?? (k / (need + 1)) * duration)
+  }
+  return out
+}
+
+/**
+ * Given reference section boundaries, map each to Alexia's timeline via DTW
+ * on onset/energy envelopes so tempo differences stretch/compress sections.
+ */
+function mapRefSectionsToStudent(
+  refBounds: number[],
+  path: [number, number][],
+  refDuration: number,
+  studentDuration: number,
+  nRef: number,
+  nStudent: number,
+): { rStart: number; rEnd: number; sStart: number; sEnd: number }[] {
+  const count = refBounds.length - 1
+  const raw = []
+  for (let i = 0; i < count; i++) {
+    const rStart = refBounds[i]
+    const rEnd = refBounds[i + 1]
+    const sStart = mapRefTimeToStudent(rStart, path, refDuration, studentDuration, nRef, nStudent)
+    const sEnd = mapRefTimeToStudent(rEnd, path, refDuration, studentDuration, nRef, nStudent)
+    raw.push({ rStart, rEnd, sStart, sEnd })
+  }
+
+  // Enforce contiguous, monotonic Alexia windows (no overlap / reordering).
+  const minWidth = Math.max(0.2, studentDuration / (count * 5))
+  const sBounds = new Array<number>(count + 1)
+  sBounds[0] = 0
+  sBounds[count] = studentDuration
+  for (let i = 1; i < count; i++) {
+    // Prefer mapped start of section i (≈ end of i-1)
+    const mapped = 0.5 * (raw[i - 1].sEnd + raw[i].sStart)
+    sBounds[i] = mapped
+  }
+  for (let i = 1; i < count; i++) {
+    if (sBounds[i] < sBounds[i - 1] + minWidth) {
+      sBounds[i] = sBounds[i - 1] + minWidth
+    }
+  }
+  for (let i = count - 1; i >= 1; i--) {
+    if (sBounds[i] > sBounds[i + 1] - minWidth) {
+      sBounds[i] = Math.max(sBounds[i - 1] + minWidth, sBounds[i + 1] - minWidth)
+    }
+  }
+  sBounds[0] = 0
+  sBounds[count] = studentDuration
+
+  return raw.map((w, i) => ({
+    rStart: w.rStart,
+    rEnd: w.rEnd,
+    sStart: sBounds[i],
+    sEnd: sBounds[i + 1],
+  }))
 }
 
 export async function analyzeSolo(studentBlob: Blob): Promise<AnalysisResult> {
@@ -325,20 +499,24 @@ export async function analyzeComparison(studentBlob: Blob, referenceBlob: Blob):
   const rOnsets = onsetStrength(rEnv.rms)
 
   const count = SECTION_COUNT
-  const aligned = alignSections(studentBuf.duration, refBuf.duration, count)
-  const refined = dtwRefineRefWindows(
-    sEnv.rms,
-    sEnv.times,
-    rEnv.rms,
-    rEnv.times,
-    studentBuf.duration,
-    count,
-  )
+  const refDuration = refBuf.duration
+  const studentDuration = studentBuf.duration
+
+  // 1) Sections come from the REFERENCE (phrase valleys / onset-energy progress).
+  const refBounds = referenceSectionBoundaries(rEnv.times, rEnv.rms, rOnsets, refDuration, count)
+
+  // 2) DTW-align Alexia ↔ reference on onset/energy so each ref section maps to her time range.
+  const n = DTW_POINTS
+  const sFeat = alignmentFeature(sEnv.rms, sOnsets, n)
+  const rFeat = alignmentFeature(rEnv.rms, rOnsets, n)
+  const path = dtwPath(sFeat, rFeat) // [studentFrame, refFrame]
+  const windows = mapRefSectionsToStudent(refBounds, path, refDuration, studentDuration, n, n)
 
   const sections: SectionAnalysis[] = []
   for (let i = 0; i < count; i++) {
-    const sM = sectionMetrics(sEnv.times, sEnv.rms, sOnsets, aligned[i].sStart, aligned[i].sEnd)
-    const rM = sectionMetrics(rEnv.times, rEnv.rms, rOnsets, refined[i].rStart, refined[i].rEnd)
+    const { rStart, rEnd, sStart, sEnd } = windows[i]
+    const sM = sectionMetrics(sEnv.times, sEnv.rms, sOnsets, sStart, sEnd)
+    const rM = sectionMetrics(rEnv.times, rEnv.rms, rOnsets, rStart, rEnd)
 
     const tempoRatio = rM.tempoProxy > 1e-8 ? sM.tempoProxy / rM.tempoProxy : 1
     const volRatio = rM.volumeRms > 1e-8 ? sM.volumeRms / rM.volumeRms : 1
@@ -357,8 +535,10 @@ export async function analyzeComparison(studentBlob: Blob, referenceBlob: Blob):
     sections.push({
       index: i,
       label: labelFor(i, count),
+      // Alexia’s DTW-aligned window for this musical section
       startSec: sM.startSec,
       endSec: sM.endSec,
+      // Canonical section on the reference performance
       refStartSec: rM.startSec,
       refEndSec: rM.endSec,
       tempoScore,
@@ -373,22 +553,22 @@ export async function analyzeComparison(studentBlob: Blob, referenceBlob: Blob):
   }
 
   const hone = sections.filter((s) => s.overall !== 'green').map((s) => s.label)
-  const durDiff = Math.abs(studentBuf.duration - refBuf.duration) / Math.max(refBuf.duration, 0.001)
+  const durDiff = Math.abs(studentDuration - refDuration) / Math.max(refDuration, 0.001)
   const durNote =
     durDiff > 0.25
-      ? ` Note: take length differs from reference by ${Math.round(durDiff * 100)}% — alignment is approximate.`
+      ? ` Note: take length differs from reference by ${Math.round(durDiff * 100)}% — DTW stretches sections to match.`
       : ''
 
   const summary =
     hone.length === 0
-      ? `Nice work — sections look close to your reference (tempo proxy + volume).${durNote}`
-      : `Hone these sections: ${hone.join(', ')}. Compared using DTW-aligned sections (onset density + RMS volume).${durNote}`
+      ? `Nice work — sections look close to your reference (tempo proxy + volume). Sections are defined on the reference, then DTW-aligned to Alexia’s take.${durNote}`
+      : `Hone these sections: ${hone.join(', ')}. Sections follow the reference performance (phrase/energy boundaries); Alexia’s windows are DTW-aligned so Play both compares the same musical part even if tempos differ.${durNote}`
 
   return {
     mode: 'comparison',
     sections,
     summary,
     honeSections: hone,
-    durationSec: studentBuf.duration,
+    durationSec: studentDuration,
   }
 }

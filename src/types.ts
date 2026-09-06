@@ -10,9 +10,10 @@ export type SectionScore = 'green' | 'amber' | 'red'
 export interface SectionAnalysis {
   index: number
   label: string
+  /** Alexia’s window for this section (solo: equal slices; comparison: DTW-aligned to reference). */
   startSec: number
   endSec: number
-  /** Reference window (comparison mode only; DTW-aligned). */
+  /** Canonical section on the reference (comparison mode only). */
   refStartSec?: number
   refEndSec?: number
   tempoScore: SectionScore

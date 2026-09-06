@@ -35,10 +35,16 @@ export interface PiecePracticeSections {
   updatedAt: number
 }
 
-/** Alexia take windows keyed by practice section id. */
+/** Alexia take windows keyed by practice section id, plus stars & stickers. */
 export interface TakeSectionTimes {
   takeId: string
   /** sectionId → start/end on this take */
   bySection: Record<string, { startSec: number; endSec: number }>
+  /** Stars 1–5 per section (Joe rates after listening). */
+  starsBySection?: Record<string, number>
+  /** Stickers on the whole take. */
+  stickers?: string[]
+  /** Stickers per section. */
+  stickersBySection?: Record<string, string[]>
   updatedAt: number
 }

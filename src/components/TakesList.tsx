@@ -5,7 +5,10 @@ import {
   PLAYBACK_RETRY_TYPES,
   reviveAudioBlob,
 } from '../lib/audioMime'
+import { getTakeSectionTimesMany } from '../lib/storage'
 import type { Take } from '../types'
+import { StarDisplay } from './StarRating'
+import { StickerChips } from './StickerPicker'
 
 interface Props {
   takes: Take[]
@@ -13,6 +16,8 @@ interface Props {
   onSelect: (take: Take) => void
   onDelete: (id: string) => void
   onUpdateNotes: (id: string, notes: string) => void
+  /** Bump when stars/stickers change. */
+  refreshKey?: number
 }
 
 function formatDate(ts: number): string {
@@ -35,12 +40,62 @@ function downloadTake(take: Take): void {
   downloadBlob(take.blob, `alexia-take-${take.pieceId}-${stamp}.${ext}`)
 }
 
-export function TakesList({ takes, selectedId, onSelect, onDelete, onUpdateNotes }: Props) {
+export function TakesList({
+  takes,
+  selectedId,
+  onSelect,
+  onDelete,
+  onUpdateNotes,
+  refreshKey = 0,
+}: Props) {
   const [urls, setUrls] = useState<Record<string, string>>({})
   const [playErrors, setPlayErrors] = useState<Record<string, string>>({})
   const [retryIndex, setRetryIndex] = useState<Record<string, number>>({})
+  const [takeMeta, setTakeMeta] = useState<
+    Record<string, { stickers: string[]; avgStars: number | null }>
+  >({})
 
   const audioKey = takes.map((t) => `${t.id}:${t.blob.size}:${t.blob.type}`).join('|')
+  const takeIdsKey = takes.map((t) => t.id).join('|')
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const rows = await getTakeSectionTimesMany(takes.map((t) => t.id))
+        if (cancelled) return
+        const next: Record<string, { stickers: string[]; avgStars: number | null }> = {}
+        for (const t of takes) {
+          const row = rows[t.id]
+          const stickers = [...(row?.stickers ?? [])]
+          const seen = new Set(stickers)
+          for (const list of Object.values(row?.stickersBySection ?? {})) {
+            for (const id of list) {
+              if (!seen.has(id)) {
+                seen.add(id)
+                stickers.push(id)
+              }
+            }
+          }
+          const starVals = Object.values(row?.starsBySection ?? {}).filter(
+            (n) => typeof n === 'number' && n >= 1 && n <= 5,
+          )
+          const avgStars =
+            starVals.length > 0
+              ? Math.round((starVals.reduce((a, b) => a + b, 0) / starVals.length) * 10) / 10
+              : null
+          next[t.id] = { stickers, avgStars }
+        }
+        setTakeMeta(next)
+      } catch {
+        if (!cancelled) setTakeMeta({})
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [takeIdsKey, refreshKey])
 
   useEffect(() => {
     let cancelled = false
@@ -132,6 +187,17 @@ export function TakesList({ takes, selectedId, onSelect, onDelete, onUpdateNotes
                 </button>
               </div>
             </div>
+            {(takeMeta[take.id]?.avgStars != null || (takeMeta[take.id]?.stickers?.length ?? 0) > 0) && (
+              <div className="take-gamify-summary">
+                {takeMeta[take.id]?.avgStars != null && (
+                  <span className="take-avg-stars" title="Average stars">
+                    <StarDisplay value={Math.round(takeMeta[take.id].avgStars!)} />
+                    <span className="take-avg-num">{takeMeta[take.id].avgStars} avg</span>
+                  </span>
+                )}
+                <StickerChips ids={takeMeta[take.id]?.stickers ?? []} />
+              </div>
+            )}
             {urls[take.id] && !playErrors[take.id] && (
               <audio
                 controls

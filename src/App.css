@@ -644,3 +644,373 @@ input.input-readonly {
   padding: 0;
   background: transparent;
 }
+
+/* —— Stars, Stickers, Progress (kid-friendly) —— */
+
+.star-rating {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.55rem;
+}
+
+.star-rating-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #5a4e3c;
+}
+
+.star-rating-row {
+  display: inline-flex;
+  gap: 0.1rem;
+}
+
+.star-btn {
+  border: none;
+  background: transparent;
+  padding: 0.1rem 0.12rem;
+  cursor: pointer;
+  font-size: 1.25rem;
+  line-height: 1;
+  color: #c9b896;
+  transition: transform 0.12s ease;
+}
+
+.star-rating-sm .star-btn {
+  font-size: 1.1rem;
+}
+
+.star-btn.is-filled {
+  color: #f0b429;
+  text-shadow: 0 1px 0 rgba(180, 120, 20, 0.15);
+}
+
+.star-btn:hover:not(:disabled) {
+  transform: scale(1.12);
+  color: #e8a820;
+}
+
+.star-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.star-display {
+  display: inline-flex;
+  gap: 0.02rem;
+  color: #c9b896;
+  letter-spacing: -0.02em;
+}
+
+.star-display .is-filled {
+  color: #f0b429;
+}
+
+.star-display-sm {
+  font-size: 0.95rem;
+}
+
+.star-display-md {
+  font-size: 1.15rem;
+}
+
+.sticker-picker {
+  margin-top: 0.35rem;
+}
+
+.sticker-picker.is-compact {
+  margin-top: 0.25rem;
+}
+
+.sticker-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.3rem;
+}
+
+.sticker-picker-title {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #5a4e3c;
+}
+
+.sticker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.sticker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.2rem 0.45rem 0.2rem 0.35rem;
+  border-radius: 999px;
+  border: 1px solid rgba(80, 70, 50, 0.08);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #3a3340;
+  line-height: 1.2;
+}
+
+.sticker-emoji {
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
+.sticker-chip-label {
+  white-space: nowrap;
+}
+
+.sticker-chip-remove {
+  border: none;
+  background: rgba(255, 255, 255, 0.55);
+  border-radius: 999px;
+  width: 1.15rem;
+  height: 1.15rem;
+  padding: 0;
+  margin-left: 0.1rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  color: #667085;
+}
+
+.sticker-chip-remove:hover {
+  background: #fff;
+  color: #1e2935;
+}
+
+.sticker-empty {
+  font-size: 0.75rem;
+  color: #9aa3b0;
+  font-style: italic;
+}
+
+.sticker-palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
+  padding: 0.5rem;
+  border-radius: 12px;
+  background: #f7f3eb;
+  border: 1px solid #ebe4d8;
+}
+
+.sticker-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  padding: 0.3rem 0.55rem;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #3a3340;
+}
+
+.sticker-option.is-on {
+  border-color: #7aa39a;
+  box-shadow: 0 0 0 1px rgba(122, 163, 154, 0.35);
+}
+
+.sticker-option:hover {
+  filter: brightness(0.98);
+}
+
+.take-gamify-bar {
+  margin: 0.55rem 0 0.35rem;
+  padding: 0.55rem 0.65rem;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #fff8e8 0%, #f0f7f4 100%);
+  border: 1px solid #e8dfd0;
+}
+
+.section-gamify {
+  margin-top: 0.55rem;
+  padding-top: 0.5rem;
+  border-top: 1px dashed #e5ded2;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.take-gamify-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0.35rem 0 0.25rem;
+}
+
+.take-avg-stars {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+
+.take-avg-num {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #8a7a64;
+}
+
+.progress-profile.card {
+  background: linear-gradient(160deg, #fffdf8 0%, #f3f9f6 55%, #f8f0ff 100%);
+  border-color: #e0d8cc;
+}
+
+.progress-profile h2 {
+  color: #2f4f5a;
+}
+
+.progress-overall {
+  margin: 0.35rem 0 0.75rem;
+  padding: 0.65rem 0.8rem;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid #e5ded2;
+}
+
+.progress-overall-text {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #2f4f5a;
+  line-height: 1.4;
+}
+
+.progress-subhead {
+  margin: 0 0 0.35rem;
+  font-size: 0.88rem;
+  color: #5a4e3c;
+}
+
+.progress-stickers-block {
+  margin-bottom: 0.85rem;
+}
+
+.progress-takes-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.85rem;
+}
+
+.progress-take-pill {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.4rem 0.65rem;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid #ebe4d8;
+  min-width: 4.5rem;
+}
+
+.progress-take-pill.is-latest {
+  border-color: #7aa39a;
+  background: #eef6f3;
+}
+
+.progress-take-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8a7a64;
+}
+
+.progress-take-pill.is-latest .progress-take-label {
+  color: #2f5a4c;
+}
+
+.progress-take-date {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #1e2935;
+}
+
+.progress-section-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.progress-section-row {
+  padding: 0.55rem 0.65rem;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid #ebe4d8;
+}
+
+.progress-section-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
+  margin-bottom: 0.4rem;
+}
+
+.progress-section-name {
+  font-weight: 700;
+  font-size: 0.92rem;
+  color: #1e2935;
+}
+
+.progress-trend {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: #f3f1ec;
+  color: #5a4e3c;
+}
+
+.progress-trend.trend-improving {
+  background: #e4f5e8;
+  color: #2a6b3c;
+}
+
+.progress-trend.trend-same {
+  background: #e8f1f4;
+  color: #2f4f5a;
+}
+
+.progress-trend.trend-needs-work {
+  background: #fff3e0;
+  color: #8a5a12;
+}
+
+.progress-trend.trend-new {
+  background: #f3e8ff;
+  color: #5a3d7a;
+}
+
+.progress-star-history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 1rem;
+}
+
+.progress-star-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.progress-star-when {
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: #9aa3b0;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}

@@ -243,12 +243,103 @@ export async function getTakeSectionTimes(takeId: string): Promise<TakeSectionTi
   })
 }
 
+export async function getTakeSectionTimesMany(
+  takeIds: string[],
+): Promise<Record<string, TakeSectionTimes>> {
+  const out: Record<string, TakeSectionTimes> = {}
+  if (takeIds.length === 0) return out
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(TAKE_SECTION_TIMES_STORE, 'readonly')
+    const store = tx.objectStore(TAKE_SECTION_TIMES_STORE)
+    let pending = takeIds.length
+    for (const id of takeIds) {
+      const req = store.get(id)
+      req.onsuccess = () => {
+        const row = req.result as TakeSectionTimes | undefined
+        if (row) out[id] = row
+        pending -= 1
+        if (pending === 0) resolve(out)
+      }
+      req.onerror = () => reject(req.error)
+    }
+  })
+}
+
+/**
+ * Write take section times. Merges with any existing stars/stickers so time-only
+ * saves never wipe gamification fields.
+ */
 export async function saveTakeSectionTimes(row: TakeSectionTimes): Promise<void> {
   const db = await openDb()
   return new Promise((resolve, reject) => {
     const tx = db.transaction(TAKE_SECTION_TIMES_STORE, 'readwrite')
-    tx.objectStore(TAKE_SECTION_TIMES_STORE).put(row)
+    const store = tx.objectStore(TAKE_SECTION_TIMES_STORE)
+    const getReq = store.get(row.takeId)
+    getReq.onsuccess = () => {
+      const prev = getReq.result as TakeSectionTimes | undefined
+      const merged: TakeSectionTimes = {
+        takeId: row.takeId,
+        bySection: row.bySection,
+        updatedAt: row.updatedAt,
+        starsBySection:
+          row.starsBySection !== undefined
+            ? row.starsBySection
+            : (prev?.starsBySection ?? {}),
+        stickers: row.stickers !== undefined ? row.stickers : (prev?.stickers ?? []),
+        stickersBySection:
+          row.stickersBySection !== undefined
+            ? row.stickersBySection
+            : (prev?.stickersBySection ?? {}),
+      }
+      store.put(merged)
+    }
     tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+  })
+}
+
+/** Patch stars / stickers on a take without touching section times. */
+export async function patchTakeGamification(
+  takeId: string,
+  patch: {
+    starsBySection?: Record<string, number>
+    stickers?: string[]
+    stickersBySection?: Record<string, string[]>
+  },
+): Promise<TakeSectionTimes> {
+  const db = await openDb()
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(TAKE_SECTION_TIMES_STORE, 'readwrite')
+    const store = tx.objectStore(TAKE_SECTION_TIMES_STORE)
+    const getReq = store.get(takeId)
+    getReq.onsuccess = () => {
+      const prev = (getReq.result as TakeSectionTimes | undefined) ?? {
+        takeId,
+        bySection: {},
+        starsBySection: {},
+        stickers: [],
+        stickersBySection: {},
+        updatedAt: Date.now(),
+      }
+      const next: TakeSectionTimes = {
+        ...prev,
+        takeId,
+        bySection: prev.bySection ?? {},
+        starsBySection:
+          patch.starsBySection !== undefined
+            ? patch.starsBySection
+            : (prev.starsBySection ?? {}),
+        stickers: patch.stickers !== undefined ? patch.stickers : (prev.stickers ?? []),
+        stickersBySection:
+          patch.stickersBySection !== undefined
+            ? patch.stickersBySection
+            : (prev.stickersBySection ?? {}),
+        updatedAt: Date.now(),
+      }
+      store.put(next)
+      tx.oncomplete = () => resolve(next)
+    }
     tx.onerror = () => reject(tx.error)
   })
 }

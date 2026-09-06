@@ -2,10 +2,13 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import {
   getPiecePracticeSectionsWithLegacyFallback,
   getTakeSectionTimes,
+  patchTakeGamification,
   savePiecePracticeSections,
   saveTakeSectionTimes,
 } from '../lib/storage'
 import type { PracticeSection } from '../types'
+import { StarRating } from './StarRating'
+import { StickerPicker } from './StickerPicker'
 import type { TakePlayerHandle } from './TakePlayer'
 import type { YouTubePlayerHandle } from './YouTubePlayer'
 
@@ -14,6 +17,8 @@ interface Props {
   takeId: string | null
   youtubeRef: RefObject<YouTubePlayerHandle | null>
   takeRef: RefObject<TakePlayerHandle | null>
+  /** Fired when stars/stickers change so the progress card can refresh. */
+  onGamificationChange?: () => void
 }
 
 function newSectionId(): string {
@@ -344,15 +349,26 @@ function makeAlexiaContinuous(sections: PracticeSection[], alexia: AlexiaTimes):
   return next
 }
 
-export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props) {
+export function PracticeSections({
+  pieceId,
+  takeId,
+  youtubeRef,
+  takeRef,
+  onGamificationChange,
+}: Props) {
   const [sections, setSections] = useState<PracticeSection[]>([])
   const [alexia, setAlexia] = useState<AlexiaTimes>({})
+  const [starsBySection, setStarsBySection] = useState<Record<string, number>>({})
+  const [takeStickers, setTakeStickers] = useState<string[]>([])
+  const [stickersBySection, setStickersBySection] = useState<Record<string, string[]>>({})
   const [status, setStatus] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [templateDirty, setTemplateDirty] = useState(false)
   const sectionsRef = useRef(sections)
   sectionsRef.current = sections
   const savedTemplateJsonRef = useRef('[]')
+  const onGamifyRef = useRef(onGamificationChange)
+  onGamifyRef.current = onGamificationChange
 
   /** YouTube sections are the piece template — edit locally until Save. */
   const applyYtTemplateLocal = useCallback((next: PracticeSection[]) => {
@@ -449,12 +465,18 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     let cancelled = false
     // Always clear immediately so a prior take’s times never flash/edit into the new take.
     setAlexia({})
+    setStarsBySection({})
+    setTakeStickers([])
+    setStickersBySection({})
     if (!takeId) return
     void (async () => {
       try {
-        // Per-take Alexia times only — never touch the piece YouTube template.
+        // Per-take Alexia times + stars/stickers — never touch the piece YouTube template.
         const row = await getTakeSectionTimes(takeId)
         if (cancelled) return
+        setStarsBySection(row?.starsBySection ?? {})
+        setTakeStickers(row?.stickers ?? [])
+        setStickersBySection(row?.stickersBySection ?? {})
         const loaded = row?.bySection ?? {}
         if (Object.keys(loaded).length === 0) {
           setAlexia({})
@@ -475,7 +497,12 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
         }
       } catch (err) {
         console.error(err)
-        if (!cancelled) setAlexia({})
+        if (!cancelled) {
+          setAlexia({})
+          setStarsBySection({})
+          setTakeStickers([])
+          setStickersBySection({})
+        }
       }
     })()
     return () => {
@@ -728,6 +755,52 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     }
   }
 
+  const setSectionStars = (sectionId: string, stars: number) => {
+    if (!takeId) {
+      setStatus('Select a take first, then tap Stars.')
+      return
+    }
+    setStarsBySection((prev) => {
+      const next = { ...prev }
+      if (stars < 1) delete next[sectionId]
+      else next[sectionId] = stars
+      void patchTakeGamification(takeId, { starsBySection: next })
+        .then(() => onGamifyRef.current?.())
+        .catch((err) => {
+          console.error(err)
+          setStatus('Could not save stars.')
+        })
+      return next
+    })
+    if (stars >= 1) setStatus(`Stars saved: ${stars} ★`)
+    else setStatus('Stars cleared')
+  }
+
+  const setSectionStickers = (sectionId: string, ids: string[]) => {
+    if (!takeId) return
+    setStickersBySection((prev) => {
+      const next = { ...prev, [sectionId]: ids }
+      void patchTakeGamification(takeId, { stickersBySection: next })
+        .then(() => onGamifyRef.current?.())
+        .catch((err) => {
+          console.error(err)
+          setStatus('Could not save stickers.')
+        })
+      return next
+    })
+  }
+
+  const setWholeTakeStickers = (ids: string[]) => {
+    if (!takeId) return
+    setTakeStickers(ids)
+    void patchTakeGamification(takeId, { stickers: ids })
+      .then(() => onGamifyRef.current?.())
+      .catch((err) => {
+        console.error(err)
+        setStatus('Could not save stickers.')
+      })
+  }
+
   const alexiaStartFor = (index: number, sectionId: string): number => {
     if (index === 0) return alexia[sectionId]?.startSec ?? 0
     const prevId = sections[index - 1]?.id
@@ -772,6 +845,16 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
           <span className="hint inline-hint">Select a take to mark Alexia times.</span>
         )}
       </div>
+
+      {takeId && (
+        <div className="take-gamify-bar">
+          <StickerPicker
+            title="Stickers for this take"
+            selected={takeStickers}
+            onChange={setWholeTakeStickers}
+          />
+        </div>
+      )}
 
       {sections.length === 0 ? (
         <p className="hint">No sections yet. Add one for the opening phrase, a tricky bar, etc.</p>
@@ -933,6 +1016,23 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                     />
                   </div>
                 </div>
+
+                {takeId && (
+                  <div className="section-gamify">
+                    <StarRating
+                      value={starsBySection[section.id]}
+                      onChange={(n) => setSectionStars(section.id, n)}
+                      label="Stars"
+                      size="sm"
+                    />
+                    <StickerPicker
+                      title="Stickers"
+                      compact
+                      selected={stickersBySection[section.id] ?? []}
+                      onChange={(ids) => setSectionStickers(section.id, ids)}
+                    />
+                  </div>
+                )}
               </li>
             )
           })}

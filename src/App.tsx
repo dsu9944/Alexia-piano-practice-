@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { PieceNotes } from './components/PieceNotes'
 import { PiecePicker } from './components/PiecePicker'
 import { PracticeSections } from './components/PracticeSections'
+import { ProgressProfile } from './components/ProgressProfile'
 import { Recorder } from './components/Recorder'
 import { TakePlayer, type TakePlayerHandle } from './components/TakePlayer'
 import { TakesList } from './components/TakesList'
@@ -44,6 +45,8 @@ export default function App() {
   const [otherPieceCounts, setOtherPieceCounts] = useState<{ id: string; title: string; count: number }[]>(
     [],
   )
+  const [gamifyTick, setGamifyTick] = useState(0)
+  const bumpGamify = useCallback(() => setGamifyTick((n) => n + 1), [])
 
   // One-time pieceId migration before loading takes / templates.
   useEffect(() => {
@@ -151,7 +154,8 @@ export default function App() {
           <h1>Alexia Piano Practice</h1>
           <p className="tagline">
             Record Alexia’s take, mark her section times against the saved YouTube template, and
-            compare by ear. All on this device — no account, no auto scoring.
+            compare by ear. Joe can add Stars and Stickers. All on this device — no account, no auto
+            scoring.
           </p>
         </div>
       </header>
@@ -186,7 +190,10 @@ export default function App() {
           takeId={selectedTake?.id ?? null}
           youtubeRef={youtubeRef}
           takeRef={takePlayerRef}
+          onGamificationChange={bumpGamify}
         />
+
+        <ProgressProfile pieceId={piece.id} takes={takes} refreshKey={gamifyTick} />
 
         {!loadError && takes.length === 0 && otherPieceCounts.length > 0 && (
           <div className="recover-hint card" role="status">
@@ -220,6 +227,7 @@ export default function App() {
           onSelect={setSelectedTake}
           onDelete={handleDelete}
           onUpdateNotes={handleTakeNotes}
+          refreshKey={gamifyTick}
         />
         <TakePlayer ref={takePlayerRef} take={selectedTake} />
 

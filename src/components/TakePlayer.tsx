@@ -45,6 +45,7 @@ export const TakePlayer = forwardRef<TakePlayerHandle, Props>(function TakePlaye
 ) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const clipEndRef = useRef<number | null>(null)
+  const clipTimerRef = useRef<number | null>(null)
   const [url, setUrl] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -52,6 +53,10 @@ export const TakePlayer = forwardRef<TakePlayerHandle, Props>(function TakePlaye
 
   const stopClipWatch = () => {
     clipEndRef.current = null
+    if (clipTimerRef.current != null) {
+      window.clearInterval(clipTimerRef.current)
+      clipTimerRef.current = null
+    }
   }
 
   const stop = () => {
@@ -60,6 +65,15 @@ export const TakePlayer = forwardRef<TakePlayerHandle, Props>(function TakePlaye
     if (!audio) return
     audio.pause()
     audio.currentTime = 0
+    setPlaying(false)
+  }
+
+  /** Pause clip playback without rewinding the whole take (section Stop). */
+  const stopClip = () => {
+    const audio = audioRef.current
+    stopClipWatch()
+    if (!audio) return
+    audio.pause()
     setPlaying(false)
   }
 
@@ -84,18 +98,60 @@ export const TakePlayer = forwardRef<TakePlayerHandle, Props>(function TakePlaye
     audio.currentTime = Math.max(0, Math.min(duration, sec))
   }
 
+  /** Safari often ignores currentTime if play() runs before seek completes. */
+  const seekAndWait = (audio: HTMLAudioElement, sec: number): Promise<void> => {
+    const duration = Number.isFinite(audio.duration) ? audio.duration : Number.POSITIVE_INFINITY
+    const target = Math.max(0, Math.min(duration, sec))
+    if (Math.abs((audio.currentTime || 0) - target) < 0.05) {
+      return Promise.resolve()
+    }
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        audio.removeEventListener('seeked', finish)
+        window.clearTimeout(timeout)
+        resolve()
+      }
+      const timeout = window.setTimeout(finish, 400)
+      audio.addEventListener('seeked', finish)
+      try {
+        audio.currentTime = target
+      } catch {
+        finish()
+      }
+    })
+  }
+
+  const startClipWatch = (audio: HTMLAudioElement, end: number) => {
+    stopClipWatch()
+    clipEndRef.current = end
+    // timeupdate is sparse on Safari — poll so we stop at the section end.
+    clipTimerRef.current = window.setInterval(() => {
+      const limit = clipEndRef.current
+      if (limit == null) return
+      if (audio.currentTime >= limit - 0.05) {
+        audio.pause()
+        stopClipWatch()
+        setPlaying(false)
+      }
+    }, 50)
+  }
+
   const playClip = async (startSec: number, endSec: number) => {
     const audio = audioRef.current
     if (!audio) return
     const start = Math.max(0, startSec)
     const end = Math.max(start + 0.15, endSec)
     stopClipWatch()
-    clipEndRef.current = end
-    audio.currentTime = start
     try {
+      await seekAndWait(audio, start)
+      startClipWatch(audio, end)
       await audio.play()
     } catch (err) {
       console.warn(err)
+      stopClipWatch()
       setError('Playback was blocked — tap Play again, or check browser autoplay settings.')
     }
   }
@@ -109,7 +165,7 @@ export const TakePlayer = forwardRef<TakePlayerHandle, Props>(function TakePlaye
       getCurrentTime,
       seekTo,
       playClip,
-      stopClip: stop,
+      stopClip,
     }),
     [url, error],
   )

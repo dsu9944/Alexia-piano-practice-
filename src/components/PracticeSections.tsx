@@ -311,26 +311,35 @@ function makeYtContinuous(sections: PracticeSection[]): PracticeSection[] {
   const next = sections.map((s) => ({ ...s }))
   for (let i = 1; i < next.length; i++) {
     next[i].youtubeStartSec = next[i - 1].youtubeEndSec
-    if (next[i].youtubeEndSec < next[i].youtubeStartSec) {
-      next[i].youtubeEndSec = round1(next[i].youtubeStartSec + 0.5)
+    if (next[i].youtubeEndSec <= next[i].youtubeStartSec + 0.05) {
+      // Keep a usable default window when cascade pushes start past end.
+      next[i].youtubeEndSec = round1(next[i].youtubeStartSec + 20)
     }
   }
   return next
 }
 
-/** Same continuity rule for Alexia take times, keyed by section order. */
+/** Same continuity rule for Alexia take times, keyed by section order.
+ *  Section i start is always previous end. Missing windows default to start+20. */
 function makeAlexiaContinuous(sections: PracticeSection[], alexia: AlexiaTimes): AlexiaTimes {
   if (sections.length === 0) return alexia
   const next: AlexiaTimes = { ...alexia }
   for (let i = 1; i < sections.length; i++) {
     const prevId = sections[i - 1].id
     const id = sections[i].id
-    const prevEnd = next[prevId]?.endSec
-    if (prevEnd === undefined) continue
-    const cur = next[id] ?? { startSec: prevEnd, endSec: round1(prevEnd + 0.5) }
+    const prev = next[prevId]
+    if (!prev || !Number.isFinite(prev.endSec)) continue
+    const prevEnd = round1(prev.endSec)
+    const cur = next[id]
     const startSec = prevEnd
-    const endSec = Math.max(cur.endSec, round1(startSec + 0.5))
-    next[id] = { startSec: round1(startSec), endSec: round1(endSec) }
+    // Preserve an existing end when still valid; otherwise default to a 20s window.
+    let endSec: number
+    if (cur && Number.isFinite(cur.endSec) && cur.endSec > startSec + 0.05) {
+      endSec = round1(cur.endSec)
+    } else {
+      endSec = round1(startSec + 20)
+    }
+    next[id] = { startSec, endSec }
   }
   return next
 }
@@ -370,22 +379,23 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     }
   }, [pieceId])
 
+  /** Apply Alexia map update with continuous starts, then persist for this take. */
   const persistAlexia = useCallback(
-    async (next: AlexiaTimes, sectionOrder?: PracticeSection[]) => {
+    (recipe: (prev: AlexiaTimes) => AlexiaTimes, sectionOrder?: PracticeSection[]) => {
       const order = sectionOrder ?? sectionsRef.current
-      const continuous = makeAlexiaContinuous(order, next)
-      setAlexia(continuous)
-      if (!takeId) return
-      try {
-        await saveTakeSectionTimes({
+      setAlexia((prev) => {
+        const continuous = makeAlexiaContinuous(order, recipe(prev))
+        if (!takeId) return continuous
+        void saveTakeSectionTimes({
           takeId,
           bySection: continuous,
           updatedAt: Date.now(),
+        }).catch((err) => {
+          console.error(err)
+          setStatus('Could not save Alexia section times.')
         })
-      } catch (err) {
-        console.error(err)
-        setStatus('Could not save Alexia section times.')
-      }
+        return continuous
+      })
     },
     [takeId],
   )
@@ -437,10 +447,9 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
 
   useEffect(() => {
     let cancelled = false
-    if (!takeId) {
-      setAlexia({})
-      return
-    }
+    // Always clear immediately so a prior take’s times never flash/edit into the new take.
+    setAlexia({})
+    if (!takeId) return
     void (async () => {
       try {
         // Per-take Alexia times only — never touch the piece YouTube template.
@@ -502,9 +511,28 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
       youtubeStartSec: ytStart,
       youtubeEndSec: ytEnd,
     }
-    applyYtTemplateLocal([...sections, next])
-    // Do not invent Alexia times — leave empty for this take until marked.
-    setStatus(`Added “${next.label}”. Save YouTube template when ready.`)
+    const order = [...sections, next]
+    applyYtTemplateLocal(order)
+    // With a take selected, seed Alexia window as start→start+20 (chained from prev end).
+    if (takeId) {
+      const aStart = prev
+        ? round1(
+            alexia[prev.id] && Number.isFinite(alexia[prev.id].endSec)
+              ? alexia[prev.id].endSec
+              : 0,
+          )
+        : 0
+      const aEnd = round1(aStart + 20)
+      persistAlexia((prevMap) => ({
+        ...prevMap,
+        [next.id]: { startSec: aStart, endSec: aEnd },
+      }), order)
+      setStatus(
+        `Added “${next.label}” (YouTube + Alexia ${formatSec(aStart)}–${formatSec(aEnd)}s). Save YouTube template when ready.`,
+      )
+    } else {
+      setStatus(`Added “${next.label}”. Save YouTube template when ready.`)
+    }
   }
 
   const updateSection = (id: string, patch: Partial<PracticeSection>) => {
@@ -536,8 +564,10 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     const next = sections.filter((s) => s.id !== id)
     applyYtTemplateLocal(next)
     if (takeId && alexia[id]) {
-      const { [id]: _, ...rest } = alexia
-      void persistAlexia(rest, next)
+      persistAlexia((prev) => {
+        const { [id]: _, ...rest } = prev
+        return rest
+      }, next)
     }
   }
 
@@ -548,30 +578,34 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     }
     const idx = sections.findIndex((s) => s.id === sectionId)
     if (idx < 0) return
+    const order = sectionsRef.current
 
-    const startSec =
-      idx === 0
-        ? (alexia[sectionId]?.startSec ?? 0)
-        : (alexia[sections[idx - 1].id]?.endSec ?? alexia[sectionId]?.startSec ?? 0)
-
-    const next: AlexiaTimes = {
-      ...alexia,
-      [sectionId]: { startSec: round1(startSec), endSec: round1(endSec) },
-    }
-
-    if (idx + 1 < sections.length) {
-      const nextId = sections[idx + 1].id
-      const nextCur = next[nextId] ?? {
-        startSec: endSec,
-        endSec: round1(endSec + 0.5),
+    persistAlexia((prev) => {
+      const startSec =
+        idx === 0
+          ? (prev[sectionId]?.startSec ?? 0)
+          : (prev[order[idx - 1]?.id]?.endSec ?? prev[sectionId]?.startSec ?? 0)
+      const safeStart = round1(startSec)
+      const safeEnd = round1(Math.max(endSec, safeStart + 0.5))
+      const next: AlexiaTimes = {
+        ...prev,
+        [sectionId]: { startSec: safeStart, endSec: safeEnd },
       }
-      next[nextId] = {
-        startSec: round1(endSec),
-        endSec: round1(Math.max(nextCur.endSec, endSec + 0.5)),
-      }
-    }
 
-    void persistAlexia(next)
+      // Mirror YouTube: end of i sets start of i+1 immediately (makeAlexiaContinuous cascades further).
+      if (idx + 1 < order.length) {
+        const nextId = order[idx + 1].id
+        const nextCur = next[nextId]
+        const nextStart = safeEnd
+        const nextEnd =
+          nextCur && Number.isFinite(nextCur.endSec) && nextCur.endSec > nextStart + 0.05
+            ? round1(Math.max(nextCur.endSec, nextStart + 0.5))
+            : round1(nextStart + 20)
+        next[nextId] = { startSec: nextStart, endSec: nextEnd }
+      }
+
+      return next
+    })
   }
 
   const setAlexiaStartFirst = (startSec: number) => {
@@ -581,11 +615,18 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     }
     if (sections.length === 0) return
     const firstId = sections[0].id
-    const cur = alexia[firstId] ?? { startSec: 0, endSec: 20 }
-    const end = Math.max(cur.endSec, round1(startSec + 0.5))
-    void persistAlexia({
-      ...alexia,
-      [firstId]: { startSec: round1(startSec), endSec: round1(end) },
+    const safeStart = round1(Math.max(0, startSec))
+    persistAlexia((prev) => {
+      const cur = prev[firstId]
+      // New window: start → start+20. Existing end kept if still after start.
+      const end =
+        cur && Number.isFinite(cur.endSec) && cur.endSec > safeStart + 0.05
+          ? round1(Math.max(cur.endSec, safeStart + 0.5))
+          : round1(safeStart + 20)
+      return {
+        ...prev,
+        [firstId]: { startSec: safeStart, endSec: end },
+      }
     })
   }
 
@@ -690,7 +731,9 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
   const alexiaStartFor = (index: number, sectionId: string): number => {
     if (index === 0) return alexia[sectionId]?.startSec ?? 0
     const prevId = sections[index - 1]?.id
-    if (prevId && alexia[prevId]) return alexia[prevId].endSec
+    if (prevId && alexia[prevId] && Number.isFinite(alexia[prevId].endSec)) {
+      return round1(alexia[prevId].endSec)
+    }
     return alexia[sectionId]?.startSec ?? 0
   }
 

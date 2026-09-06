@@ -255,7 +255,7 @@ textarea:focus {
 
 .section-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
   gap: 0.65rem;
 }
 
@@ -306,6 +306,49 @@ textarea:focus {
 .score.red { background: #f0c7c2; color: #8a3028; }
 
 .section-notes { margin: 0; font-size: 0.8rem; color: #5a6472; }
+
+.section-play {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem;
+  margin-top: 0.55rem;
+}
+
+.section-card.is-playing {
+  box-shadow: 0 0 0 2px rgba(61, 107, 122, 0.35);
+}
+
+.play-note {
+  font-size: 0.72rem;
+  color: #7a8494;
+  line-height: 1.3;
+}
+
+.now-playing {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 0 0.75rem;
+  padding: 0.45rem 0.7rem;
+  border-radius: 10px;
+  background: #e8f1f4;
+  color: #2f4f5a;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.stop-inline {
+  margin-left: auto;
+}
+
+.playback-hint {
+  margin: 0.65rem 0 0;
+  font-size: 0.8rem;
+  color: #7a8494;
+}
+
 .legend { margin: 0.85rem 0 0; font-size: 0.82rem; color: #667085; }
 
 .footer {

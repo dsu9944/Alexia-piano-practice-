@@ -359,6 +359,8 @@ export async function analyzeComparison(studentBlob: Blob, referenceBlob: Blob):
       label: labelFor(i, count),
       startSec: sM.startSec,
       endSec: sM.endSec,
+      refStartSec: rM.startSec,
+      refEndSec: rM.endSec,
       tempoScore,
       volumeScore,
       overall,

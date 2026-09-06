@@ -12,6 +12,9 @@ export interface SectionAnalysis {
   label: string
   startSec: number
   endSec: number
+  /** Reference window (comparison mode only; DTW-aligned). */
+  refStartSec?: number
+  refEndSec?: number
   tempoScore: SectionScore
   volumeScore: SectionScore
   overall: SectionScore

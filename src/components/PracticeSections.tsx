@@ -162,6 +162,102 @@ function SecondsInput({
   )
 }
 
+interface SectionScrubberProps {
+  startSec: number
+  endSec: number
+  disabled?: boolean
+  onSeek: (sec: number) => void
+  onPlayFromStart: () => void
+  onPlayFromHere: (fromSec: number) => void
+  playLabel: string
+}
+
+/**
+ * Range scrubber locked to a section’s start→end. Drag seeks the player;
+ * play from section start or from the scrub thumb.
+ */
+function SectionScrubber({
+  startSec,
+  endSec,
+  disabled = false,
+  onSeek,
+  onPlayFromStart,
+  onPlayFromHere,
+  playLabel,
+}: SectionScrubberProps) {
+  const valid =
+    Number.isFinite(startSec) && Number.isFinite(endSec) && endSec > startSec + 0.05
+  const lo = valid ? round1(startSec) : 0
+  const hi = valid ? round1(endSec) : 0.1
+  const [pos, setPos] = useState(lo)
+
+  useEffect(() => {
+    setPos((prev) => {
+      if (!valid) return lo
+      const clamped = Math.min(hi, Math.max(lo, round1(prev)))
+      return clamped
+    })
+  }, [lo, hi, valid])
+
+  const seek = (raw: number) => {
+    if (!valid || disabled) return
+    const next = round1(Math.min(hi, Math.max(lo, raw)))
+    setPos(next)
+    onSeek(next)
+  }
+
+  const inactive = disabled || !valid
+
+  return (
+    <div className={`section-scrubber${inactive ? ' is-disabled' : ''}`}>
+      <div className="section-scrubber-meta">
+        <span className="section-scrubber-heading">Scrub this section</span>
+        <span className="section-scrubber-time" aria-live="polite">
+          {valid ? (
+            <>
+              at <strong>{formatSec(pos)}s</strong>
+              <span className="section-scrubber-range">
+                {' '}
+                ({formatSec(lo)}–{formatSec(hi)}s)
+              </span>
+            </>
+          ) : (
+            'Set start and end first'
+          )}
+        </span>
+      </div>
+      <input
+        type="range"
+        min={lo}
+        max={hi}
+        step={0.1}
+        value={valid ? Math.min(hi, Math.max(lo, pos)) : lo}
+        disabled={inactive}
+        aria-label={`${playLabel} section scrubber`}
+        onChange={(e) => seek(Number(e.target.value))}
+      />
+      <div className="section-scrubber-actions">
+        <button
+          type="button"
+          className="btn primary"
+          disabled={inactive}
+          onClick={onPlayFromStart}
+        >
+          ▶ Play from start
+        </button>
+        <button
+          type="button"
+          className="btn secondary"
+          disabled={inactive}
+          onClick={() => onPlayFromHere(pos)}
+        >
+          ▶ Play from here
+        </button>
+      </div>
+    </div>
+  )
+}
+
 type AlexiaTimes = Record<string, { startSec: number; endSec: number }>
 
 /** Start of section i (i>0) always equals end of i-1. Section 0 start unchanged. */
@@ -488,27 +584,49 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     }
   }
 
-  const playYtClip = (section: PracticeSection) => {
+  const playYtClip = (section: PracticeSection, fromSec?: number) => {
     const start = section.youtubeStartSec
     const end = section.youtubeEndSec
     if (!(end > start)) {
       setStatus('Set YouTube end after start for this section.')
       return
     }
-    youtubeRef.current?.playClip(start, end)
-    setStatus(`Playing YouTube: ${section.label} (${formatSec(start)}–${formatSec(end)}s)`)
+    const from =
+      fromSec == null
+        ? start
+        : round1(Math.min(end, Math.max(start, fromSec)))
+    youtubeRef.current?.playClip(from, end)
+    if (from === round1(start)) {
+      setStatus(`Playing YouTube: ${section.label} (${formatSec(start)}–${formatSec(end)}s)`)
+    } else {
+      setStatus(
+        `Playing YouTube from ${formatSec(from)}s: ${section.label} (→${formatSec(end)}s)`,
+      )
+    }
   }
 
-  const playAlexiaClip = (sectionId: string, label: string) => {
-    const times = alexia[sectionId]
-    if (!times || !(times.endSec > times.startSec)) {
+  const playAlexiaClip = (
+    label: string,
+    startSec: number,
+    endSec: number,
+    fromSec?: number,
+  ) => {
+    if (!(endSec > startSec)) {
       setStatus('Mark Alexia start and end for this section first.')
       return
     }
-    void takeRef.current?.playClip(times.startSec, times.endSec)
-    setStatus(
-      `Playing Alexia: ${label} (${formatSec(times.startSec)}–${formatSec(times.endSec)}s)`,
-    )
+    const from =
+      fromSec == null
+        ? startSec
+        : round1(Math.min(endSec, Math.max(startSec, fromSec)))
+    void takeRef.current?.playClip(from, endSec)
+    if (from === round1(startSec)) {
+      setStatus(`Playing Alexia: ${label} (${formatSec(startSec)}–${formatSec(endSec)}s)`)
+    } else {
+      setStatus(
+        `Playing Alexia from ${formatSec(from)}s: ${label} (→${formatSec(endSec)}s)`,
+      )
+    }
   }
 
   const alexiaStartFor = (index: number, sectionId: string): number => {
@@ -530,8 +648,8 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
       <p className="hint">
         YouTube times are saved for this piece (shared). Alexia times are saved for the selected take
         (each recording can differ slightly). Section 1 start is editable; later starts follow the
-        previous end automatically. Type times (e.g. 12.5) or use − / + to nudge by 0.1s; press Enter
-        or click away to save.
+        previous end automatically. Type times (e.g. 12.5) or use − / + to nudge by 0.1s. Drag each
+        section’s scrubber to seek within that clip, then play from start or from here.
       </p>
 
       {loadError && <p className="error">{loadError}</p>}
@@ -558,7 +676,6 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
             const startLocked = index > 0
             const aStart = alexiaStartFor(index, section.id)
             const aEnd = alexia[section.id]?.endSec ?? 0
-            const hasAlexia = Boolean(takeId && alexia[section.id] && aEnd > aStart)
             return (
               <li key={section.id} className="section-edit-card">
                 <div className="section-edit-top">
@@ -631,13 +748,14 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                         Mark YouTube end
                       </button>
                     </div>
-                    <button
-                      type="button"
-                      className="btn primary"
-                      onClick={() => playYtClip(section)}
-                    >
-                      ▶ Play YouTube clip
-                    </button>
+                    <SectionScrubber
+                      startSec={section.youtubeStartSec}
+                      endSec={section.youtubeEndSec}
+                      playLabel="YouTube"
+                      onSeek={(sec) => youtubeRef.current?.seekTo(sec)}
+                      onPlayFromStart={() => playYtClip(section)}
+                      onPlayFromHere={(from) => playYtClip(section, from)}
+                    />
                   </div>
 
                   <div className="time-block">
@@ -690,14 +808,19 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                         Mark Alexia end
                       </button>
                     </div>
-                    <button
-                      type="button"
-                      className="btn primary"
-                      disabled={!hasAlexia}
-                      onClick={() => playAlexiaClip(section.id, section.label)}
-                    >
-                      ▶ Play Alexia clip
-                    </button>
+                    <SectionScrubber
+                      startSec={aStart}
+                      endSec={aEnd}
+                      disabled={!takeId}
+                      playLabel="Alexia"
+                      onSeek={(sec) => takeRef.current?.seekTo(sec)}
+                      onPlayFromStart={() =>
+                        playAlexiaClip(section.label, aStart, aEnd)
+                      }
+                      onPlayFromHere={(from) =>
+                        playAlexiaClip(section.label, aStart, aEnd, from)
+                      }
+                    />
                   </div>
                 </div>
               </li>

@@ -123,8 +123,8 @@ export default function App() {
           <p className="eyebrow">Suzuki Piano School · Book 2</p>
           <h1>Alexia Piano Practice</h1>
           <p className="tagline">
-            Mark the same bit on YouTube and on Alexia’s take, then play each clip to compare by ear.
-            All on this device — no account, no auto scoring.
+            Record Alexia’s take, mark her section times against the saved YouTube template, and
+            compare by ear. All on this device — no account, no auto scoring.
           </p>
         </div>
       </header>
@@ -146,14 +146,6 @@ export default function App() {
           {piece.composer && <p className="composer">{piece.composer}</p>}
         </div>
 
-        <YouTubePlayer ref={youtubeRef} youtubeId={piece.youtubeId} title={piece.title} />
-        <TakePlayer ref={takePlayerRef} take={selectedTake} />
-        <PracticeSections
-          pieceId={piece.id}
-          takeId={selectedTake?.id ?? null}
-          youtubeRef={youtubeRef}
-          takeRef={takePlayerRef}
-        />
         <Recorder onSave={handleSaveTake} />
 
         {!loadError && takes.length === 0 && otherPieceCounts.length > 0 && (
@@ -189,7 +181,27 @@ export default function App() {
           onDelete={handleDelete}
           onUpdateNotes={handleTakeNotes}
         />
+        <TakePlayer ref={takePlayerRef} take={selectedTake} />
+
+        <PracticeSections
+          pieceId={piece.id}
+          takeId={selectedTake?.id ?? null}
+          youtubeRef={youtubeRef}
+          takeRef={takePlayerRef}
+        />
+
         <PieceNotes value={notes} onChange={handleNotesChange} />
+
+        <details className="youtube-reference card">
+          <summary className="youtube-reference-summary">
+            YouTube reference (for cutting template)
+          </summary>
+          <p className="hint youtube-reference-hint">
+            Optional — open when marking or tweaking the piece’s YouTube template. Daily practice can
+            stay on record + Alexia times.
+          </p>
+          <YouTubePlayer ref={youtubeRef} youtubeId={piece.youtubeId} title={piece.title} />
+        </details>
       </main>
 
       <footer className="footer">

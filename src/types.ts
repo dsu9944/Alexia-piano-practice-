@@ -20,7 +20,7 @@ export interface PieceNotes {
   updatedAt: number
 }
 
-/** YouTube window for a named practice bit — shared across takes for a piece. */
+/** YouTube window for a named practice bit — piece template, shared across takes. */
 export interface PracticeSection {
   id: string
   label: string
@@ -28,6 +28,7 @@ export interface PracticeSection {
   youtubeEndSec: number
 }
 
+/** Saved YouTube section template for a piece (names + YT times). Alexia times live per take. */
 export interface PiecePracticeSections {
   pieceId: string
   sections: PracticeSection[]

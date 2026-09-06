@@ -233,9 +233,9 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
 
     return (
       <div className="youtube-wrap">
-        <h2>YouTube reference</h2>
+        <h2 className="sr-only">YouTube reference</h2>
         <p className="hint">
-          Use Play / Pause / Skip to find a musical bit, then mark it in Practice sections below.
+          Use Play / Pause / Skip to find a bit, then Mark start/end in Practice sections above.
           Audio stays on YouTube — nothing is downloaded.
         </p>
         <div className="video-frame">

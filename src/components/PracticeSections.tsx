@@ -64,7 +64,7 @@ interface SecondsInputProps {
 const STEP_SEC = 0.1
 
 /**
- * Typable seconds field plus − / + steppers (0.1s).
+ * Typable seconds field with compact ▲▼ nudges (0.1s).
  * Locked/auto-chained starts stay readOnly (no steppers).
  */
 function SecondsInput({
@@ -105,16 +105,6 @@ function SecondsInput({
 
   return (
     <div className="seconds-input-row">
-      <button
-        type="button"
-        className="btn tiny seconds-step"
-        aria-label="Decrease by 0.1 seconds"
-        title="−0.1s"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => nudge(-STEP_SEC)}
-      >
-        −
-      </button>
       <input
         type="text"
         inputMode="decimal"
@@ -148,16 +138,28 @@ function SecondsInput({
           }
         }}
       />
-      <button
-        type="button"
-        className="btn tiny seconds-step"
-        aria-label="Increase by 0.1 seconds"
-        title="+0.1s"
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => nudge(STEP_SEC)}
-      >
-        +
-      </button>
+      <div className="seconds-stepper" role="group" aria-label="Adjust by 0.1 seconds">
+        <button
+          type="button"
+          className="seconds-nudge"
+          aria-label="Increase by 0.1 seconds"
+          title="+0.1s"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => nudge(STEP_SEC)}
+        >
+          ▲
+        </button>
+        <button
+          type="button"
+          className="seconds-nudge"
+          aria-label="Decrease by 0.1 seconds"
+          title="−0.1s"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => nudge(-STEP_SEC)}
+        >
+          ▼
+        </button>
+      </div>
     </div>
   )
 }
@@ -210,48 +212,47 @@ function SectionScrubber({
 
   return (
     <div className={`section-scrubber${inactive ? ' is-disabled' : ''}`}>
-      <div className="section-scrubber-meta">
-        <span className="section-scrubber-heading">Scrub this section</span>
+      <div className="section-scrubber-row">
         <span className="section-scrubber-time" aria-live="polite">
           {valid ? (
             <>
-              at <strong>{formatSec(pos)}s</strong>
+              <strong>{formatSec(pos)}s</strong>
               <span className="section-scrubber-range">
                 {' '}
-                ({formatSec(lo)}–{formatSec(hi)}s)
+                ({formatSec(lo)}–{formatSec(hi)})
               </span>
             </>
           ) : (
-            'Set start and end first'
+            'Set start & end'
           )}
         </span>
+        <input
+          type="range"
+          min={lo}
+          max={hi}
+          step={0.1}
+          value={valid ? Math.min(hi, Math.max(lo, pos)) : lo}
+          disabled={inactive}
+          aria-label={`${playLabel} section scrubber`}
+          onChange={(e) => seek(Number(e.target.value))}
+        />
       </div>
-      <input
-        type="range"
-        min={lo}
-        max={hi}
-        step={0.1}
-        value={valid ? Math.min(hi, Math.max(lo, pos)) : lo}
-        disabled={inactive}
-        aria-label={`${playLabel} section scrubber`}
-        onChange={(e) => seek(Number(e.target.value))}
-      />
       <div className="section-scrubber-actions">
         <button
           type="button"
-          className="btn primary"
+          className="btn tiny primary"
           disabled={inactive}
           onClick={onPlayFromStart}
         >
-          ▶ Play from start
+          ▶ Start
         </button>
         <button
           type="button"
-          className="btn secondary"
+          className="btn tiny secondary"
           disabled={inactive}
           onClick={() => onPlayFromHere(pos)}
         >
-          ▶ Play from here
+          ▶ Here
         </button>
       </div>
     </div>
@@ -295,26 +296,35 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
   const [alexia, setAlexia] = useState<AlexiaTimes>({})
   const [status, setStatus] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [templateDirty, setTemplateDirty] = useState(false)
   const sectionsRef = useRef(sections)
   sectionsRef.current = sections
+  const savedTemplateJsonRef = useRef('[]')
 
-  const persistPiece = useCallback(
-    async (next: PracticeSection[]) => {
-      const continuous = makeYtContinuous(next)
-      setSections(continuous)
-      try {
-        await savePiecePracticeSections({
-          pieceId,
-          sections: continuous,
-          updatedAt: Date.now(),
-        })
-      } catch (err) {
-        console.error(err)
-        setStatus('Could not save YouTube section times.')
-      }
-    },
-    [pieceId],
-  )
+  /** YouTube sections are the piece template — edit locally until Save. */
+  const applyYtTemplateLocal = useCallback((next: PracticeSection[]) => {
+    const continuous = makeYtContinuous(next)
+    setSections(continuous)
+    setTemplateDirty(JSON.stringify(continuous) !== savedTemplateJsonRef.current)
+  }, [])
+
+  const saveYouTubeTemplate = useCallback(async () => {
+    const continuous = makeYtContinuous(sectionsRef.current)
+    setSections(continuous)
+    try {
+      await savePiecePracticeSections({
+        pieceId,
+        sections: continuous,
+        updatedAt: Date.now(),
+      })
+      savedTemplateJsonRef.current = JSON.stringify(continuous)
+      setTemplateDirty(false)
+      setStatus('Template saved for this piece')
+    } catch (err) {
+      console.error(err)
+      setStatus('Could not save YouTube template.')
+    }
+  }, [pieceId])
 
   const persistAlexia = useCallback(
     async (next: AlexiaTimes, sectionOrder?: PracticeSection[]) => {
@@ -340,13 +350,18 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     let cancelled = false
     setLoadError(null)
     setSections([])
+    setTemplateDirty(false)
+    setStatus(null)
     void (async () => {
       try {
+        // Load piece YouTube template (shared across takes).
         const row = await getPiecePracticeSections(pieceId)
         if (cancelled) return
         const loaded = row?.sections ?? []
         const continuous = makeYtContinuous(loaded)
         setSections(continuous)
+        savedTemplateJsonRef.current = JSON.stringify(continuous)
+        setTemplateDirty(false)
         if (
           loaded.length > 0 &&
           JSON.stringify(loaded) !== JSON.stringify(continuous)
@@ -357,13 +372,14 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
               sections: continuous,
               updatedAt: Date.now(),
             })
+            savedTemplateJsonRef.current = JSON.stringify(continuous)
           } catch (err) {
             console.error(err)
           }
         }
       } catch (err) {
         console.error(err)
-        if (!cancelled) setLoadError('Could not load practice sections for this piece.')
+        if (!cancelled) setLoadError('Could not load YouTube template for this piece.')
       }
     })()
     return () => {
@@ -379,9 +395,14 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     }
     void (async () => {
       try {
+        // Per-take Alexia times only — never touch the piece YouTube template.
         const row = await getTakeSectionTimes(takeId)
         if (cancelled) return
         const loaded = row?.bySection ?? {}
+        if (Object.keys(loaded).length === 0) {
+          setAlexia({})
+          return
+        }
         const continuous = makeAlexiaContinuous(sectionsRef.current, loaded)
         setAlexia(continuous)
         if (JSON.stringify(continuous) !== JSON.stringify(loaded)) {
@@ -406,9 +427,11 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
   }, [takeId])
 
   // Re-apply Alexia continuity when section order is ready (covers load races).
+  // Only when this take already has some marked times — never invent or write template.
   useEffect(() => {
     if (!takeId || sections.length < 2) return
     setAlexia((prev) => {
+      if (Object.keys(prev).length === 0) return prev
       const continuous = makeAlexiaContinuous(sections, prev)
       if (JSON.stringify(continuous) === JSON.stringify(prev)) return prev
       void saveTakeSectionTimes({
@@ -431,22 +454,9 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
       youtubeStartSec: ytStart,
       youtubeEndSec: ytEnd,
     }
-    const nextSections = [...sections, next]
-    void persistPiece(nextSections)
-
-    if (takeId && prev) {
-      const prevA = alexia[prev.id]
-      const aStart = prevA?.endSec ?? 0
-      void persistAlexia(
-        {
-          ...alexia,
-          [next.id]: { startSec: round1(aStart), endSec: round1(aStart + 10) },
-        },
-        nextSections,
-      )
-    }
-
-    setStatus(`Added “${next.label}”. It starts where the last section ended.`)
+    applyYtTemplateLocal([...sections, next])
+    // Do not invent Alexia times — leave empty for this take until marked.
+    setStatus(`Added “${next.label}”. Save YouTube template when ready.`)
   }
 
   const updateSection = (id: string, patch: Partial<PracticeSection>) => {
@@ -471,13 +481,13 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
       }
     }
 
-    void persistPiece(next)
+    applyYtTemplateLocal(next)
   }
 
   const deleteSection = (id: string) => {
     const next = sections.filter((s) => s.id !== id)
-    void persistPiece(next)
-    if (takeId) {
+    applyYtTemplateLocal(next)
+    if (takeId && alexia[id]) {
       const { [id]: _, ...rest } = alexia
       void persistAlexia(rest, next)
     }
@@ -543,15 +553,15 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
       }
       const end = Math.max(section.youtubeEndSec, t + 0.5)
       updateSection(section.id, { youtubeStartSec: t, youtubeEndSec: end })
-      setStatus(`YouTube start marked at ${formatSec(t)}s`)
+      setStatus(`YouTube start marked at ${formatSec(t)}s — save template when ready`)
     } else {
       updateSection(section.id, { youtubeEndSec: t })
       if (idx + 1 < sections.length) {
         setStatus(
-          `YouTube end marked at ${formatSec(t)}s — next section starts there too.`,
+          `YouTube end marked at ${formatSec(t)}s — next starts there. Save template when ready.`,
         )
       } else {
-        setStatus(`YouTube end marked at ${formatSec(t)}s`)
+        setStatus(`YouTube end marked at ${formatSec(t)}s — save template when ready`)
       }
     }
   }
@@ -639,17 +649,9 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
   return (
     <div className="practice-sections card">
       <h2>Practice sections</h2>
-      <p className="compare-tip">
-        Mark the same musical bit on YouTube and on Alexia’s take, then play each to compare by ear.
-      </p>
       <p className="compare-tip continuous-tip">
-        Each section starts where the last one ended.
-      </p>
-      <p className="hint">
-        YouTube times are saved for this piece (shared). Alexia times are saved for the selected take
-        (each recording can differ slightly). Section 1 start is editable; later starts follow the
-        previous end automatically. Type times (e.g. 12.5) or use − / + to nudge by 0.1s. Drag each
-        section’s scrubber to seek within that clip, then play from start or from here.
+        YouTube cuts are the piece template. For each new take, only set Alexia’s times.
+        Continuous — each section starts where the last ended. Type or use ▲▼ / ↑↓ (±0.1s).
       </p>
 
       {loadError && <p className="error">{loadError}</p>}
@@ -663,6 +665,18 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
         <button type="button" className="btn primary" onClick={addSection}>
           + Add section
         </button>
+        <button
+          type="button"
+          className={`btn ${templateDirty ? 'secondary' : 'ghost'}`}
+          onClick={() => void saveYouTubeTemplate()}
+          disabled={sections.length === 0 && !templateDirty}
+          title="Save YouTube section names and times as this piece’s template"
+        >
+          Save YouTube template
+        </button>
+        {templateDirty && (
+          <span className="hint inline-hint dirty-hint">Unsaved template changes</span>
+        )}
         {!takeId && (
           <span className="hint inline-hint">Select a take to mark Alexia times.</span>
         )}
@@ -680,12 +694,13 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
               <li key={section.id} className="section-edit-card">
                 <div className="section-edit-top">
                   <label className="section-label-field">
-                    Name
+                    <span className="sr-only">Name</span>
                     <input
                       type="text"
                       value={section.label}
                       onChange={(e) => updateSection(section.id, { label: e.target.value })}
-                      placeholder="e.g. Opening"
+                      placeholder="Section name"
+                      aria-label="Section name"
                     />
                   </label>
                   <button
@@ -693,18 +708,38 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                     className="btn tiny ghost"
                     onClick={() => deleteSection(section.id)}
                   >
-                    Delete
+                    ✕
                   </button>
                 </div>
 
                 <div className="section-times-grid">
                   <div className="time-block">
-                    <h3>YouTube</h3>
+                    <div className="time-block-head">
+                      <h3>YouTube</h3>
+                      <div className="mark-row">
+                        {!startLocked && (
+                          <button
+                            type="button"
+                            className="btn micro secondary"
+                            onClick={() => markYt(section, 'start')}
+                          >
+                            Mark start
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn micro secondary"
+                          onClick={() => markYt(section, 'end')}
+                        >
+                          Mark end
+                        </button>
+                      </div>
+                    </div>
                     <div className="time-inputs">
                       <label>
-                        Start (s)
+                        Start
                         {startLocked && (
-                          <span className="locked-hint">from previous end</span>
+                          <span className="locked-hint">← prev</span>
                         )}
                         <SecondsInput
                           value={section.youtubeStartSec}
@@ -721,7 +756,7 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                         />
                       </label>
                       <label>
-                        End (s)
+                        End
                         <SecondsInput
                           value={section.youtubeEndSec}
                           onCommit={(seconds) =>
@@ -729,24 +764,6 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                           }
                         />
                       </label>
-                    </div>
-                    <div className="mark-row">
-                      {!startLocked && (
-                        <button
-                          type="button"
-                          className="btn tiny secondary"
-                          onClick={() => markYt(section, 'start')}
-                        >
-                          Mark YouTube start
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="btn tiny secondary"
-                        onClick={() => markYt(section, 'end')}
-                      >
-                        Mark YouTube end
-                      </button>
                     </div>
                     <SectionScrubber
                       startSec={section.youtubeStartSec}
@@ -759,12 +776,34 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                   </div>
 
                   <div className="time-block">
-                    <h3>Alexia’s take</h3>
+                    <div className="time-block-head">
+                      <h3>Alexia</h3>
+                      <div className="mark-row">
+                        {!startLocked && (
+                          <button
+                            type="button"
+                            className="btn micro secondary"
+                            disabled={!takeId}
+                            onClick={() => markAlexia(section.id, 'start')}
+                          >
+                            Mark start
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="btn micro secondary"
+                          disabled={!takeId}
+                          onClick={() => markAlexia(section.id, 'end')}
+                        >
+                          Mark end
+                        </button>
+                      </div>
+                    </div>
                     <div className="time-inputs">
                       <label>
-                        Start (s)
+                        Start
                         {startLocked && (
-                          <span className="locked-hint">from previous end</span>
+                          <span className="locked-hint">← prev</span>
                         )}
                         <SecondsInput
                           value={aStart}
@@ -780,33 +819,13 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
                         />
                       </label>
                       <label>
-                        End (s)
+                        End
                         <SecondsInput
                           value={aEnd}
                           disabled={!takeId}
                           onCommit={(seconds) => setAlexiaEnd(section.id, seconds)}
                         />
                       </label>
-                    </div>
-                    <div className="mark-row">
-                      {!startLocked && (
-                        <button
-                          type="button"
-                          className="btn tiny secondary"
-                          disabled={!takeId}
-                          onClick={() => markAlexia(section.id, 'start')}
-                        >
-                          Mark Alexia start
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="btn tiny secondary"
-                        disabled={!takeId}
-                        onClick={() => markAlexia(section.id, 'end')}
-                      >
-                        Mark Alexia end
-                      </button>
                     </div>
                     <SectionScrubber
                       startSec={aStart}

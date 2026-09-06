@@ -1,4 +1,10 @@
 import { useEffect, useState } from 'react'
+import {
+  downloadBlob,
+  extensionForAudioMime,
+  PLAYBACK_RETRY_TYPES,
+  reviveAudioBlob,
+} from '../lib/audioMime'
 import type { Take } from '../types'
 
 interface Props {
@@ -23,19 +29,74 @@ function formatDur(ms: number): string {
   return `${m}:${sec.toString().padStart(2, '0')}`
 }
 
+function downloadTake(take: Take): void {
+  const ext = extensionForAudioMime(take.blob.type)
+  const stamp = new Date(take.createdAt).toISOString().slice(0, 19).replace(/[:T]/g, '-')
+  downloadBlob(take.blob, `alexia-take-${take.pieceId}-${stamp}.${ext}`)
+}
+
 export function TakesList({ takes, selectedId, onSelect, onDelete, onUpdateNotes }: Props) {
   const [urls, setUrls] = useState<Record<string, string>>({})
+  const [playErrors, setPlayErrors] = useState<Record<string, string>>({})
+  const [retryIndex, setRetryIndex] = useState<Record<string, number>>({})
 
   useEffect(() => {
-    const next: Record<string, string> = {}
-    for (const t of takes) {
-      next[t.id] = URL.createObjectURL(t.blob)
-    }
-    setUrls(next)
+    let cancelled = false
+    const created: string[] = []
+
+    void (async () => {
+      const next: Record<string, string> = {}
+      for (const t of takes) {
+        try {
+          const revived = await reviveAudioBlob(t.blob)
+          const url = URL.createObjectURL(revived)
+          created.push(url)
+          next[t.id] = url
+        } catch {
+          const url = URL.createObjectURL(t.blob)
+          created.push(url)
+          next[t.id] = url
+        }
+      }
+      if (!cancelled) {
+        setUrls(next)
+        setPlayErrors({})
+        setRetryIndex({})
+      } else {
+        created.forEach((u) => URL.revokeObjectURL(u))
+      }
+    })()
+
     return () => {
-      Object.values(next).forEach((u) => URL.revokeObjectURL(u))
+      cancelled = true
+      created.forEach((u) => URL.revokeObjectURL(u))
     }
   }, [takes])
+
+  const handleAudioError = async (take: Take) => {
+    const idx = retryIndex[take.id] ?? 0
+    if (idx < PLAYBACK_RETRY_TYPES.length) {
+      const nextType = PLAYBACK_RETRY_TYPES[idx]
+      try {
+        const rewrapped = await reviveAudioBlob(take.blob, nextType)
+        const url = URL.createObjectURL(rewrapped)
+        setUrls((prev) => {
+          if (prev[take.id]) URL.revokeObjectURL(prev[take.id])
+          return { ...prev, [take.id]: url }
+        })
+        setRetryIndex((prev) => ({ ...prev, [take.id]: idx + 1 }))
+        return
+      } catch (err) {
+        console.warn('Playback rewrap failed', nextType, err)
+        setRetryIndex((prev) => ({ ...prev, [take.id]: idx + 1 }))
+      }
+    }
+    setPlayErrors((prev) => ({
+      ...prev,
+      [take.id]:
+        'Safari couldn’t play this yet — try Download to keep the file, then open it in QuickTime or Chrome.',
+    }))
+  }
 
   if (takes.length === 0) {
     return (
@@ -61,11 +122,32 @@ export function TakesList({ takes, selectedId, onSelect, onDelete, onUpdateNotes
                   </span>
                 )}
               </button>
-              <button type="button" className="btn tiny ghost" onClick={() => onDelete(take.id)}>
-                Delete
-              </button>
+              <div className="take-actions">
+                <button type="button" className="btn tiny ghost" onClick={() => downloadTake(take)}>
+                  Download
+                </button>
+                <button type="button" className="btn tiny ghost" onClick={() => onDelete(take.id)}>
+                  Delete
+                </button>
+              </div>
             </div>
-            {urls[take.id] && <audio controls src={urls[take.id]} />}
+            {urls[take.id] && !playErrors[take.id] && (
+              <audio
+                controls
+                src={urls[take.id]}
+                onError={() => {
+                  void handleAudioError(take)
+                }}
+              />
+            )}
+            {playErrors[take.id] && (
+              <p className="play-error hint" role="status">
+                {playErrors[take.id]}{' '}
+                <button type="button" className="linkish" onClick={() => downloadTake(take)}>
+                  Download take
+                </button>
+              </p>
+            )}
             <label className="notes-label">
               Notes for this take
               <textarea

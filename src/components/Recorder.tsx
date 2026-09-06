@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { pickRecorderMimeType } from '../lib/audioMime'
 
 interface Props {
   onSave: (blob: Blob, durationMs: number) => void
@@ -50,12 +51,11 @@ export function Recorder({ onSave, disabled }: Props) {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
-      const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : MediaRecorder.isTypeSupported('audio/webm')
-          ? 'audio/webm'
-          : ''
-      const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream)
+      // Safari: prefer mp4/aac; Chromium: webm. Pick the first supported.
+      const mime = pickRecorderMimeType()
+      const recorder = mime
+        ? new MediaRecorder(stream, { mimeType: mime })
+        : new MediaRecorder(stream)
       mediaRecorderRef.current = recorder
       chunksRef.current = []
       recorder.ondataavailable = (e) => {
@@ -63,7 +63,9 @@ export function Recorder({ onSave, disabled }: Props) {
       }
       recorder.onstop = () => {
         const durationMs = Date.now() - startTimeRef.current
-        const blob = new Blob(chunksRef.current, { type: recorder.mimeType || 'audio/webm' })
+        // Keep the exact mime the recorder produced so IndexedDB/Safari can play later.
+        const type = recorder.mimeType || mime || 'audio/mp4'
+        const blob = new Blob(chunksRef.current, { type })
         stopTracks()
         setPendingBlob(blob)
         setPendingDuration(durationMs)
@@ -114,7 +116,10 @@ export function Recorder({ onSave, disabled }: Props) {
   return (
     <div className="recorder card">
       <h2>Record Alexia</h2>
-      <p className="hint">Uses the computer microphone. Allow access when the browser asks.</p>
+      <p className="hint">
+        Uses the computer microphone. Allow access when the browser asks. Chrome or Edge are often
+        more reliable for mic apps; Safari is supported (records as MP4/AAC when available).
+      </p>
       <div className="timer" aria-live="polite">
         {formatTime(recording || pendingBlob ? elapsed || pendingDuration : 0)}
       </div>

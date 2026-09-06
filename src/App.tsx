@@ -7,6 +7,7 @@ import { TakesList } from './components/TakesList'
 import { YouTubePlayer } from './components/YouTubePlayer'
 import { PIECES } from './data/pieces'
 import {
+  countTakesByPiece,
   deleteTake,
   getPieceNotes,
   getSelectedPieceId,
@@ -24,6 +25,10 @@ function newId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
 }
 
+function pieceTitle(pieceId: string): string {
+  return PIECES.find((p) => p.id === pieceId)?.title ?? pieceId
+}
+
 export default function App() {
   const initial =
     PIECES.find((p) => p.id === getSelectedPieceId()) ?? PIECES[0]
@@ -33,18 +38,37 @@ export default function App() {
   const [selectedTake, setSelectedTake] = useState<Take | null>(null)
   const [notes, setNotes] = useState('')
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [otherPieceCounts, setOtherPieceCounts] = useState<{ id: string; title: string; count: number }[]>(
+    [],
+  )
 
   const refreshTakes = useCallback(async (pieceId: string) => {
     try {
+      setLoadError(null)
       const list = await getTakesForPiece(pieceId)
       setTakes(list)
       setSelectedTake((prev) => {
         if (!prev) return list[0] ?? null
         return list.find((t) => t.id === prev.id) ?? list[0] ?? null
       })
+
+      if (list.length === 0) {
+        const counts = await countTakesByPiece()
+        const others = Object.entries(counts)
+          .filter(([id, n]) => id !== pieceId && n > 0)
+          .map(([id, count]) => ({ id, title: pieceTitle(id), count }))
+          .sort((a, b) => b.count - a.count)
+        setOtherPieceCounts(others)
+      } else {
+        setOtherPieceCounts([])
+      }
     } catch (err) {
       console.error(err)
-      setLoadError('Could not load saved takes from this browser.')
+      setLoadError(
+        'Could not load saved takes from this browser. Your recordings are usually still on this device — try Retry, or check you are on the same browser/device.',
+      )
+      setTakes([])
+      setOtherPieceCounts([])
     }
   }, [])
 
@@ -86,7 +110,11 @@ export default function App() {
 
   const handleAnalyzed = async (takeId: string, payload: AnalyzedPayload) => {
     const { result, reference } = payload
-    await updateTakeAnalysis(takeId, result, reference)
+    try {
+      await updateTakeAnalysis(takeId, result, reference)
+    } catch (err) {
+      console.error('Failed to persist analysis (take audio is still safe):', err)
+    }
     setTakes((prev) =>
       prev.map((t) =>
         t.id === takeId
@@ -130,7 +158,14 @@ export default function App() {
         </div>
       </header>
 
-      {loadError && <p className="error banner-error">{loadError}</p>}
+      {loadError && (
+        <div className="error banner-error load-error" role="alert">
+          <p>{loadError}</p>
+          <button type="button" className="btn secondary tiny" onClick={() => void refreshTakes(piece.id)}>
+            Retry
+          </button>
+        </div>
+      )}
 
       <PiecePicker selectedId={piece.id} onSelect={handleSelectPiece} />
 
@@ -142,6 +177,33 @@ export default function App() {
 
         <YouTubePlayer youtubeId={piece.youtubeId} title={piece.title} />
         <Recorder onSave={handleSaveTake} />
+
+        {!loadError && takes.length === 0 && otherPieceCounts.length > 0 && (
+          <div className="recover-hint card" role="status">
+            <p className="hint" style={{ marginBottom: '0.5rem' }}>
+              No takes for this piece — check the piece dropdown. Recordings may be under another piece.
+            </p>
+            <ul className="recover-counts">
+              {otherPieceCounts.map((row) => (
+                <li key={row.id}>
+                  <button
+                    type="button"
+                    className="linkish"
+                    onClick={() => {
+                      const p = PIECES.find((x) => x.id === row.id)
+                      if (p) handleSelectPiece(p)
+                    }}
+                  >
+                    {row.title}
+                  </button>
+                  {' — '}
+                  {row.count} take{row.count === 1 ? '' : 's'}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
         <TakesList
           takes={takes}
           selectedId={selectedTake?.id ?? null}

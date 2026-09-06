@@ -13,6 +13,7 @@ import {
   getPieceNotes,
   getSelectedPieceId,
   getTakesForPiece,
+  migratePieceIdsOnce,
   savePieceNotes,
   saveTake,
   setSelectedPieceId,
@@ -30,20 +31,45 @@ function pieceTitle(pieceId: string): string {
 }
 
 export default function App() {
-  const initial =
-    PIECES.find((p) => p.id === getSelectedPieceId()) ?? PIECES[0]
-
   const youtubeRef = useRef<YouTubePlayerHandle | null>(null)
   const takePlayerRef = useRef<TakePlayerHandle | null>(null)
 
-  const [piece, setPiece] = useState<Piece>(initial)
+  const [ready, setReady] = useState(false)
+  const [piece, setPiece] = useState<Piece>(() => PIECES[0])
   const [takes, setTakes] = useState<Take[]>([])
   const [selectedTake, setSelectedTake] = useState<Take | null>(null)
   const [notes, setNotes] = useState('')
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [migrateNote, setMigrateNote] = useState<string | null>(null)
   const [otherPieceCounts, setOtherPieceCounts] = useState<{ id: string; title: string; count: number }[]>(
     [],
   )
+
+  // One-time pieceId migration before loading takes / templates.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const result = await migratePieceIdsOnce()
+        if (cancelled) return
+        if (result.ran && result.restoredTemplates.length > 0) {
+          setMigrateNote('Restored saved template from earlier piece name.')
+        }
+      } catch (err) {
+        console.error('pieceId migration failed', err)
+      } finally {
+        if (!cancelled) {
+          const selected =
+            PIECES.find((p) => p.id === getSelectedPieceId()) ?? PIECES[0]
+          setPiece(selected)
+          setReady(true)
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   const refreshTakes = useCallback(async (pieceId: string) => {
     try {
@@ -76,10 +102,11 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    if (!ready) return
     setSelectedPieceId(piece.id)
     void refreshTakes(piece.id)
     void getPieceNotes(piece.id).then((n) => setNotes(n?.text ?? ''))
-  }, [piece.id, refreshTakes])
+  }, [ready, piece.id, refreshTakes])
 
   const handleSelectPiece = (p: Piece) => {
     setPiece(p)
@@ -128,6 +155,12 @@ export default function App() {
           </p>
         </div>
       </header>
+
+      {migrateNote && (
+        <p className="hint" role="status" style={{ margin: '0 0 0.75rem' }}>
+          {migrateNote}
+        </p>
+      )}
 
       {loadError && (
         <div className="error banner-error load-error" role="alert">

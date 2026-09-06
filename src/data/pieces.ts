@@ -1,14 +1,13 @@
 import type { Piece } from '../types'
 
 export const PIECES: Piece[] = [
-  { id: 'ecossaise-rh', title: 'Écossaise — Right Hand', youtubeId: 'aA2G9yMqwtY', composer: 'Beethoven' },
-  { id: 'ecossaise-both', title: 'Écossaise — Both Hands', youtubeId: 'pcMeWgQonHg', composer: 'Beethoven' },
-  { id: 'short-story-rh', title: 'A Short Story — Right Hand', youtubeId: 'cVe5yD9OiGg', composer: 'Lichner' },
-  { id: 'short-story-both', title: 'A Short Story — Both Hands', youtubeId: 'muhc-wXVjNo', composer: 'Lichner' },
-  { id: 'happy-farmer-rh', title: 'The Happy Farmer — Right Hand', youtubeId: 'UF1qcm-fXvs', composer: 'Schumann' },
-  { id: 'happy-farmer-both', title: 'The Happy Farmer — Both Hands', youtubeId: 'whUpzz1yAs0', composer: 'Schumann' },
-  { id: 'minuet-1-rh', title: 'Minuet 1 in G, BWV 822 — Right Hand', youtubeId: 'cs6q2pcV0BI', composer: 'Bach' },
-  { id: 'minuet-1-both', title: 'Minuet 1 in G, BWV 822 — Both Hands', youtubeId: '_7tFgU0neRw', composer: 'Bach' },
+  // Before Minuet 2: single entry (both-hands video), original ids — restores saved templates.
+  { id: 'ecossaise', title: 'Écossaise', youtubeId: 'pcMeWgQonHg', composer: 'Beethoven' },
+  { id: 'short-story', title: 'A Short Story', youtubeId: 'muhc-wXVjNo', composer: 'Lichner' },
+  { id: 'happy-farmer', title: 'The Happy Farmer', youtubeId: 'whUpzz1yAs0', composer: 'Schumann' },
+  { id: 'minuet-1', title: 'Minuet 1 in G, BWV 822', youtubeId: '_7tFgU0neRw', composer: 'Bach' },
+
+  // From Minuet 2: Right Hand + Both Hands.
   { id: 'minuet-2-rh', title: 'Minuet 2 in G — Right Hand', youtubeId: 'bfcmyL8hcRo', composer: 'Bach' },
   { id: 'minuet-2-both', title: 'Minuet 2 in G — Both Hands', youtubeId: '1MNm51HxZ2U', composer: 'Bach' },
   { id: 'minuet-3-rh', title: 'Minuet 3 in Gm, BWV 822 — Right Hand', youtubeId: 'QwMvQeTwvQQ', composer: 'Bach' },

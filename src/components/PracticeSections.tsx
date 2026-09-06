@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import {
-  getPiecePracticeSections,
+  getPiecePracticeSectionsWithLegacyFallback,
   getTakeSectionTimes,
   savePiecePracticeSections,
   saveTakeSectionTimes,
@@ -398,14 +398,18 @@ export function PracticeSections({ pieceId, takeId, youtubeRef, takeRef }: Props
     setStatus(null)
     void (async () => {
       try {
-        // Load piece YouTube template (shared across takes).
-        const row = await getPiecePracticeSections(pieceId)
+        // Load piece YouTube template (shared across takes); try legacy id if empty.
+        const { row, restoredFromLegacy } =
+          await getPiecePracticeSectionsWithLegacyFallback(pieceId)
         if (cancelled) return
         const loaded = row?.sections ?? []
         const continuous = makeYtContinuous(loaded)
         setSections(continuous)
         savedTemplateJsonRef.current = JSON.stringify(continuous)
         setTemplateDirty(false)
+        if (restoredFromLegacy && continuous.length > 0) {
+          setStatus('Restored saved template from earlier piece name.')
+        }
         if (
           loaded.length > 0 &&
           JSON.stringify(loaded) !== JSON.stringify(continuous)

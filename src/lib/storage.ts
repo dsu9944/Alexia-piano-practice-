@@ -271,3 +271,260 @@ export function setSelectedPieceId(pieceId: string): void {
     // ignore
   }
 }
+
+/** One-time pieceId remaps after list rename (localStorage flag). */
+const MIGRATE_FLAG = 'alexia-piano-id-migrate-v1'
+
+/**
+ * Legacy / transient ids → current piece ids.
+ * - Early pieces: restore base ids; copy from accidental *-both if needed.
+ * - minuet-2 (pre-split): → minuet-2-both.
+ */
+export const PIECE_ID_MIGRATE: Record<string, string> = {
+  // Accidental early *-both / *-rh from the brief full RH+Both list → restored base ids
+  'ecossaise-both': 'ecossaise',
+  'ecossaise-rh': 'ecossaise',
+  'short-story-both': 'short-story',
+  'short-story-rh': 'short-story',
+  'happy-farmer-both': 'happy-farmer',
+  'happy-farmer-rh': 'happy-farmer',
+  'minuet-1-both': 'minuet-1',
+  'minuet-1-rh': 'minuet-1',
+  // Pre-split Minuet 2 → both-hands
+  'minuet-2': 'minuet-2-both',
+}
+
+/** Base id for a *-both / *-rh current id (PracticeSections empty fallback). */
+export function legacyBasePieceId(pieceId: string): string | null {
+  if (pieceId.endsWith('-both')) return pieceId.slice(0, -'-both'.length)
+  if (pieceId.endsWith('-rh')) return pieceId.slice(0, -'-rh'.length)
+  return null
+}
+
+function txDone(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve()
+    tx.onerror = () => reject(tx.error)
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'))
+  })
+}
+
+function remapSelectedPieceId(): boolean {
+  try {
+    const meta = JSON.parse(localStorage.getItem(META_KEY) || '{}') as {
+      selectedPieceId?: string
+    }
+    const cur = meta.selectedPieceId
+    if (!cur) return false
+    const next = PIECE_ID_MIGRATE[cur]
+    if (!next || next === cur) return false
+    meta.selectedPieceId = next
+    localStorage.setItem(META_KEY, JSON.stringify(meta))
+    return true
+  } catch {
+    return false
+  }
+}
+
+export type PieceIdMigrateResult = {
+  ran: boolean
+  restoredTemplates: string[]
+  remappedTakes: number
+  remappedNotes: number
+  remappedSectionMaps: number
+  remappedSelected: boolean
+}
+
+/**
+ * One-time migration: remap / copy IndexedDB rows keyed by legacy pieceIds.
+ * Safe to call every boot — no-ops after localStorage flag is set.
+ * Uses read-all then write-all transactions to avoid IDB auto-commit races.
+ */
+export async function migratePieceIdsOnce(): Promise<PieceIdMigrateResult> {
+  const empty: PieceIdMigrateResult = {
+    ran: false,
+    restoredTemplates: [],
+    remappedTakes: 0,
+    remappedNotes: 0,
+    remappedSectionMaps: 0,
+    remappedSelected: false,
+  }
+  try {
+    if (localStorage.getItem(MIGRATE_FLAG) === '1') return empty
+  } catch {
+    // still attempt migrate
+  }
+
+  const remappedSelected = remapSelectedPieceId()
+  const restoredTemplates: string[] = []
+  let remappedTakes = 0
+  let remappedNotes = 0
+  let remappedSectionMaps = 0
+
+  const db = await openDb()
+
+  // --- practiceSections: copy old → new when new missing ---
+  if (db.objectStoreNames.contains(PRACTICE_SECTIONS_STORE)) {
+    const all = await new Promise<PiecePracticeSections[]>((resolve, reject) => {
+      const tx = db.transaction(PRACTICE_SECTIONS_STORE, 'readonly')
+      const req = tx.objectStore(PRACTICE_SECTIONS_STORE).getAll()
+      req.onsuccess = () => resolve((req.result as PiecePracticeSections[]) ?? [])
+      req.onerror = () => reject(req.error)
+    })
+    const byId = new Map(all.map((r) => [r.pieceId, r]))
+    const toWrite: PiecePracticeSections[] = []
+    for (const [oldId, newId] of Object.entries(PIECE_ID_MIGRATE)) {
+      const oldRow = byId.get(oldId)
+      if (!oldRow?.sections?.length) continue
+      const newRow = byId.get(newId)
+      if (newRow?.sections?.length) continue
+      toWrite.push({
+        pieceId: newId,
+        sections: oldRow.sections,
+        updatedAt: Date.now(),
+      })
+      restoredTemplates.push(newId)
+    }
+    if (toWrite.length > 0) {
+      const tx = db.transaction(PRACTICE_SECTIONS_STORE, 'readwrite')
+      const store = tx.objectStore(PRACTICE_SECTIONS_STORE)
+      for (const row of toWrite) store.put(row)
+      await txDone(tx)
+    }
+  }
+
+  // --- takes: update pieceId in place ---
+  if (db.objectStoreNames.contains(TAKES_STORE)) {
+    const all = await new Promise<TakeRecord[]>((resolve, reject) => {
+      const tx = db.transaction(TAKES_STORE, 'readonly')
+      const req = tx.objectStore(TAKES_STORE).getAll()
+      req.onsuccess = () => resolve((req.result as TakeRecord[]) ?? [])
+      req.onerror = () => reject(req.error)
+    })
+    const toWrite = all
+      .map((rec) => {
+        const next = PIECE_ID_MIGRATE[rec.pieceId]
+        if (!next || next === rec.pieceId) return null
+        return { ...rec, pieceId: next }
+      })
+      .filter((r): r is TakeRecord => r != null)
+    if (toWrite.length > 0) {
+      const tx = db.transaction(TAKES_STORE, 'readwrite')
+      const store = tx.objectStore(TAKES_STORE)
+      for (const rec of toWrite) store.put(rec)
+      await txDone(tx)
+      remappedTakes = toWrite.length
+    }
+  }
+
+  // --- notes: copy old → new when new empty ---
+  if (db.objectStoreNames.contains(NOTES_STORE)) {
+    const all = await new Promise<PieceNotes[]>((resolve, reject) => {
+      const tx = db.transaction(NOTES_STORE, 'readonly')
+      const req = tx.objectStore(NOTES_STORE).getAll()
+      req.onsuccess = () => resolve((req.result as PieceNotes[]) ?? [])
+      req.onerror = () => reject(req.error)
+    })
+    const byId = new Map(all.map((r) => [r.pieceId, r]))
+    const toWrite: PieceNotes[] = []
+    for (const [oldId, newId] of Object.entries(PIECE_ID_MIGRATE)) {
+      const oldRow = byId.get(oldId)
+      if (!oldRow) continue
+      const newRow = byId.get(newId)
+      if (newRow && (newRow.text?.trim() ?? '') !== '') continue
+      toWrite.push({
+        pieceId: newId,
+        text: oldRow.text,
+        updatedAt: Date.now(),
+      })
+    }
+    if (toWrite.length > 0) {
+      const tx = db.transaction(NOTES_STORE, 'readwrite')
+      const store = tx.objectStore(NOTES_STORE)
+      for (const row of toWrite) store.put(row)
+      await txDone(tx)
+      remappedNotes = toWrite.length
+    }
+  }
+
+  // --- pieceSectionMap (legacy): remap pieceId ---
+  if (db.objectStoreNames.contains(SECTION_MAP_STORE)) {
+    type SectionMapRow = { id: string; pieceId: string } & Record<string, unknown>
+    const all = await new Promise<SectionMapRow[]>((resolve, reject) => {
+      const tx = db.transaction(SECTION_MAP_STORE, 'readonly')
+      const req = tx.objectStore(SECTION_MAP_STORE).getAll()
+      req.onsuccess = () => resolve((req.result as SectionMapRow[]) ?? [])
+      req.onerror = () => reject(req.error)
+    })
+    const toWrite = all
+      .map((rec) => {
+        const next = PIECE_ID_MIGRATE[rec.pieceId]
+        if (!next || next === rec.pieceId) return null
+        return { ...rec, pieceId: next }
+      })
+      .filter((r): r is SectionMapRow => r != null)
+    if (toWrite.length > 0) {
+      const tx = db.transaction(SECTION_MAP_STORE, 'readwrite')
+      const store = tx.objectStore(SECTION_MAP_STORE)
+      for (const rec of toWrite) store.put(rec)
+      await txDone(tx)
+      remappedSectionMaps = toWrite.length
+    }
+  }
+
+  try {
+    localStorage.setItem(MIGRATE_FLAG, '1')
+  } catch {
+    // ignore
+  }
+
+  return {
+    ran: true,
+    restoredTemplates,
+    remappedTakes,
+    remappedNotes,
+    remappedSectionMaps,
+    remappedSelected,
+  }
+}
+
+/**
+ * Load practice sections; if empty, try legacy id once and copy forward.
+ */
+export async function getPiecePracticeSectionsWithLegacyFallback(
+  pieceId: string,
+): Promise<{ row: PiecePracticeSections | null; restoredFromLegacy: boolean }> {
+  const row = await getPiecePracticeSections(pieceId)
+  if (row?.sections?.length) {
+    return { row, restoredFromLegacy: false }
+  }
+
+  let legacyId: string | null = null
+  for (const [oldId, newId] of Object.entries(PIECE_ID_MIGRATE)) {
+    if (newId === pieceId) {
+      legacyId = oldId
+      break
+    }
+  }
+  if (!legacyId) legacyId = legacyBasePieceId(pieceId)
+  if (!legacyId || legacyId === pieceId) {
+    return { row: row ?? null, restoredFromLegacy: false }
+  }
+
+  const legacy = await getPiecePracticeSections(legacyId)
+  if (!legacy?.sections?.length) {
+    return { row: row ?? null, restoredFromLegacy: false }
+  }
+
+  const copied: PiecePracticeSections = {
+    pieceId,
+    sections: legacy.sections,
+    updatedAt: Date.now(),
+  }
+  try {
+    await savePiecePracticeSections(copied)
+  } catch (err) {
+    console.warn('Could not copy legacy practice sections forward', err)
+  }
+  return { row: copied, restoredFromLegacy: true }
+}

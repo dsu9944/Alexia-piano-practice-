@@ -188,6 +188,23 @@
   line-height: 1.2;
 }
 
+label.btn.upload-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+}
+label.btn.upload-btn.is-disabled,
+label.btn.upload-btn:has(input:disabled) {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.upload-hint {
+  margin: 0.35rem 0 0;
+}
+
+
 .playback, .take-item audio { width: 100%; margin-top: 0.35rem; }
 .label { margin: 0 0 0.25rem; font-size: 0.85rem; color: #667085; }
 .error {

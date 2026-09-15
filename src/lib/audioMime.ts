@@ -67,3 +67,28 @@ export function downloadBlob(blob: Blob, fileName: string): void {
   // Revoke after the click has a chance to start
   window.setTimeout(() => URL.revokeObjectURL(url), 2000)
 }
+
+/** Guess container mime from a file name when blob.type is empty (common on Safari). */
+export function mimeFromFileName(name: string): string {
+  const lower = name.toLowerCase()
+  const dot = lower.lastIndexOf('.')
+  const ext = dot >= 0 ? lower.slice(dot + 1) : ''
+  switch (ext) {
+    case 'm4a':
+    case 'mp4':
+    case 'aac':
+    case 'caf':
+      return 'audio/mp4'
+    case 'mp3':
+      return 'audio/mpeg'
+    case 'wav':
+      return 'audio/wav'
+    case 'webm':
+      return 'audio/webm'
+    case 'ogg':
+    case 'oga':
+      return 'audio/ogg'
+    default:
+      return ''
+  }
+}

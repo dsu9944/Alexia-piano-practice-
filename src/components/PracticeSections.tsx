@@ -10,8 +10,8 @@ import type { PracticeSection } from '../types'
 import { StarRating } from './StarRating'
 import { StickerPicker } from './StickerPicker'
 import {
-  playLoopGapBeepReady,
-  playLoopGapBeepSoft,
+  cancelLoopCueBeeps,
+  playLoopGapBeep,
   unlockLoopCueAudio,
 } from '../lib/loopCue'
 import type { TakePlayerHandle } from './TakePlayer'
@@ -176,10 +176,8 @@ function SecondsInput({
 
 /** Pause between loop iterations (start→end → wait → repeat). */
 const LOOP_PAUSE_MS = 3000
-/** Soft beep shortly after the gap starts. */
-const LOOP_CUE_SOFT_MS = 120
-/** Brighter “get ready” beep this many ms before the next play. */
-const LOOP_CUE_READY_BEFORE_MS = 400
+/** Countdown beeps during the gap: ~0s, ~1s, ~2s; clip restarts at 3s. */
+const LOOP_CUE_BEEP_AT_MS = [0, 1000, 2000] as const
 
 /**
  * Only one section clip may be in an active play/loop session at a time.
@@ -262,6 +260,7 @@ function SectionScrubber({
       window.clearTimeout(id)
     }
     loopCueTimersRef.current = []
+    cancelLoopCueBeeps()
   }, [])
 
   const clearLoopPause = useCallback(() => {
@@ -314,20 +313,15 @@ function SectionScrubber({
     setLoopPausing(true)
     unlockLoopCueAudio()
     clearLoopCues()
-    // Soft beep near start of gap, then brighter cue ~0.4s before restart.
-    loopCueTimersRef.current.push(
-      window.setTimeout(() => {
-        if (!playingRef.current || !loopRef.current) return
-        playLoopGapBeepSoft()
-      }, LOOP_CUE_SOFT_MS),
-    )
-    const readyAt = Math.max(0, LOOP_PAUSE_MS - LOOP_CUE_READY_BEFORE_MS)
-    loopCueTimersRef.current.push(
-      window.setTimeout(() => {
-        if (!playingRef.current || !loopRef.current) return
-        playLoopGapBeepReady()
-      }, readyAt),
-    )
+    // Three firm countdown beeps at ~0s, ~1s, ~2s; restart at 3s.
+    for (const atMs of LOOP_CUE_BEEP_AT_MS) {
+      loopCueTimersRef.current.push(
+        window.setTimeout(() => {
+          if (!playingRef.current || !loopRef.current) return
+          playLoopGapBeep()
+        }, atMs),
+      )
+    }
     loopPauseTimerRef.current = window.setTimeout(() => {
       loopPauseTimerRef.current = null
       clearLoopCues()

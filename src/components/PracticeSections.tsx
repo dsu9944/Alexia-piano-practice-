@@ -9,6 +9,11 @@ import {
 import type { PracticeSection } from '../types'
 import { StarRating } from './StarRating'
 import { StickerPicker } from './StickerPicker'
+import {
+  playLoopGapBeepReady,
+  playLoopGapBeepSoft,
+  unlockLoopCueAudio,
+} from '../lib/loopCue'
 import type { TakePlayerHandle } from './TakePlayer'
 import type { YouTubePlayerHandle } from './YouTubePlayer'
 
@@ -171,6 +176,10 @@ function SecondsInput({
 
 /** Pause between loop iterations (start→end → wait → repeat). */
 const LOOP_PAUSE_MS = 3000
+/** Soft beep shortly after the gap starts. */
+const LOOP_CUE_SOFT_MS = 120
+/** Brighter “get ready” beep this many ms before the next play. */
+const LOOP_CUE_READY_BEFORE_MS = 400
 
 /**
  * Only one section clip may be in an active play/loop session at a time.
@@ -245,15 +254,24 @@ function SectionScrubber({
   const onStopRef = useRef(onStop)
   onStopRef.current = onStop
   const loopPauseTimerRef = useRef<number | null>(null)
+  const loopCueTimersRef = useRef<number[]>([])
   const clipIdRef = useRef(Symbol(`${playLabel}-clip`))
+
+  const clearLoopCues = useCallback(() => {
+    for (const id of loopCueTimersRef.current) {
+      window.clearTimeout(id)
+    }
+    loopCueTimersRef.current = []
+  }, [])
 
   const clearLoopPause = useCallback(() => {
     if (loopPauseTimerRef.current != null) {
       window.clearTimeout(loopPauseTimerRef.current)
       loopPauseTimerRef.current = null
     }
+    clearLoopCues()
     setLoopPausing(false)
-  }, [])
+  }, [clearLoopCues])
 
   const endSession = useCallback(() => {
     clearLoopPause()
@@ -294,8 +312,25 @@ function SectionScrubber({
   const scheduleLoopRestart = useCallback(() => {
     if (loopPauseTimerRef.current != null) return
     setLoopPausing(true)
+    unlockLoopCueAudio()
+    clearLoopCues()
+    // Soft beep near start of gap, then brighter cue ~0.4s before restart.
+    loopCueTimersRef.current.push(
+      window.setTimeout(() => {
+        if (!playingRef.current || !loopRef.current) return
+        playLoopGapBeepSoft()
+      }, LOOP_CUE_SOFT_MS),
+    )
+    const readyAt = Math.max(0, LOOP_PAUSE_MS - LOOP_CUE_READY_BEFORE_MS)
+    loopCueTimersRef.current.push(
+      window.setTimeout(() => {
+        if (!playingRef.current || !loopRef.current) return
+        playLoopGapBeepReady()
+      }, readyAt),
+    )
     loopPauseTimerRef.current = window.setTimeout(() => {
       loopPauseTimerRef.current = null
+      clearLoopCues()
       setLoopPausing(false)
       if (!playingRef.current) return
       if (!loopRef.current) {
@@ -309,7 +344,7 @@ function SectionScrubber({
       setPos(start)
       onPlayRef.current(start)
     }, LOOP_PAUSE_MS)
-  }, [])
+  }, [clearLoopCues])
 
   // Follow the live player while this clip session is active (incl. loop pause).
   useEffect(() => {
@@ -362,6 +397,7 @@ function SectionScrubber({
     const from = round1(Math.min(hi, Math.max(lo, posRef.current)))
     // If thumb is at/near the end, restart from section start.
     const startFrom = from >= hi - 0.05 ? lo : from
+    unlockLoopCueAudio()
     clearLoopPause()
     claimActiveClip(clipIdRef.current, () => endSessionRef.current())
     setPos(startFrom)

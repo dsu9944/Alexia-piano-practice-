@@ -511,6 +511,25 @@ textarea:focus,
   min-width: 4.4rem;
 }
 
+.section-scrubber-row .btn.loop-toggle {
+  min-width: 3.6rem;
+  border: 1px solid #c9bfb0;
+  background: #f7f3ec;
+  color: #5a4e3c;
+}
+
+.section-scrubber-row .btn.loop-toggle.is-on {
+  background: #5a8f84;
+  border-color: #4a7a70;
+  color: #fff;
+  font-weight: 700;
+}
+
+.section-scrubber-loop-pause {
+  color: #b45309;
+  font-weight: 600;
+}
+
 .footer {
   margin-top: 1.5rem;
   padding-top: 1rem;

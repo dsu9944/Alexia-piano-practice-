@@ -169,6 +169,32 @@ function SecondsInput({
   )
 }
 
+/** Pause between loop iterations (start→end → wait → repeat). */
+const LOOP_PAUSE_MS = 3000
+
+/**
+ * Only one section clip may be in an active play/loop session at a time.
+ * Starting Play on another scrubber stops the previous (clears loop timeout).
+ */
+type ActiveClipStop = () => void
+let activeClipId: symbol | null = null
+let activeClipStop: ActiveClipStop | null = null
+
+function claimActiveClip(id: symbol, stop: ActiveClipStop) {
+  if (activeClipId != null && activeClipId !== id) {
+    activeClipStop?.()
+  }
+  activeClipId = id
+  activeClipStop = stop
+}
+
+function releaseActiveClip(id: symbol) {
+  if (activeClipId === id) {
+    activeClipId = null
+    activeClipStop = null
+  }
+}
+
 interface SectionScrubberProps {
   startSec: number
   endSec: number
@@ -181,8 +207,9 @@ interface SectionScrubberProps {
 }
 
 /**
- * Mini player for one section clip: Play/Stop + scrubber.
+ * Mini player for one section clip: Play/Stop + optional Loop + scrubber.
  * Drag sets position within start→end; Play starts from the thumb (default: section start).
+ * Loop on: play start→end, pause 3s, repeat until Stop. Safari-safe via parent seek-then-play.
  */
 function SectionScrubber({
   startSec,
@@ -200,9 +227,52 @@ function SectionScrubber({
   const hi = valid ? round1(endSec) : 0.1
   const [pos, setPos] = useState(lo)
   const [playing, setPlaying] = useState(false)
+  const [loop, setLoop] = useState(false)
+  const [loopPausing, setLoopPausing] = useState(false)
   const scrubbingRef = useRef(false)
   const posRef = useRef(pos)
   posRef.current = pos
+  const playingRef = useRef(playing)
+  playingRef.current = playing
+  const loopRef = useRef(loop)
+  loopRef.current = loop
+  const loRef = useRef(lo)
+  loRef.current = lo
+  const hiRef = useRef(hi)
+  hiRef.current = hi
+  const onPlayRef = useRef(onPlay)
+  onPlayRef.current = onPlay
+  const onStopRef = useRef(onStop)
+  onStopRef.current = onStop
+  const loopPauseTimerRef = useRef<number | null>(null)
+  const clipIdRef = useRef(Symbol(`${playLabel}-clip`))
+
+  const clearLoopPause = useCallback(() => {
+    if (loopPauseTimerRef.current != null) {
+      window.clearTimeout(loopPauseTimerRef.current)
+      loopPauseTimerRef.current = null
+    }
+    setLoopPausing(false)
+  }, [])
+
+  const endSession = useCallback(() => {
+    clearLoopPause()
+    onStopRef.current()
+    setPlaying(false)
+    playingRef.current = false
+    releaseActiveClip(clipIdRef.current)
+  }, [clearLoopPause])
+
+  // Stable stop for claimActiveClip — always ends this scrubber's session.
+  const endSessionRef = useRef(endSession)
+  endSessionRef.current = endSession
+
+  useEffect(() => {
+    return () => {
+      clearLoopPause()
+      releaseActiveClip(clipIdRef.current)
+    }
+  }, [clearLoopPause])
 
   useEffect(() => {
     setPos((prev) => {
@@ -211,31 +281,70 @@ function SectionScrubber({
       if (prev < lo - 0.05 || prev > hi + 0.05) return lo
       return Math.min(hi, Math.max(lo, round1(prev)))
     })
-    if (!valid) setPlaying(false)
-  }, [lo, hi, valid])
+    if (!valid) {
+      clearLoopPause()
+      setPlaying(false)
+      playingRef.current = false
+      releaseActiveClip(clipIdRef.current)
+    }
+  }, [lo, hi, valid, clearLoopPause])
 
   const inactive = disabled || !valid
 
-  // Follow the live player while this clip is playing.
+  const scheduleLoopRestart = useCallback(() => {
+    if (loopPauseTimerRef.current != null) return
+    setLoopPausing(true)
+    loopPauseTimerRef.current = window.setTimeout(() => {
+      loopPauseTimerRef.current = null
+      setLoopPausing(false)
+      if (!playingRef.current) return
+      if (!loopRef.current) {
+        // Loop turned off during the 3s pause — end the session.
+        setPlaying(false)
+        playingRef.current = false
+        releaseActiveClip(clipIdRef.current)
+        return
+      }
+      const start = loRef.current
+      setPos(start)
+      onPlayRef.current(start)
+    }, LOOP_PAUSE_MS)
+  }, [])
+
+  // Follow the live player while this clip session is active (incl. loop pause).
   useEffect(() => {
     if (!playing || inactive) return
     const id = window.setInterval(() => {
       if (scrubbingRef.current) return
+      // Waiting between loop iterations — keep session active, thumb at end.
+      if (loopPauseTimerRef.current != null) {
+        setPos(hiRef.current)
+        return
+      }
       const t = round1(getCurrentTime())
-      if (t >= hi - 0.05) {
-        setPos(hi)
-        setPlaying(false)
+      if (t >= hiRef.current - 0.05) {
+        setPos(hiRef.current)
+        if (loopRef.current) {
+          scheduleLoopRestart()
+        } else {
+          setPlaying(false)
+          playingRef.current = false
+          releaseActiveClip(clipIdRef.current)
+        }
         return
       }
       // Another control moved the shared player outside this section.
-      if (t < lo - 0.25 || t > hi + 0.25) {
+      if (t < loRef.current - 0.25 || t > hiRef.current + 0.25) {
+        clearLoopPause()
         setPlaying(false)
+        playingRef.current = false
+        releaseActiveClip(clipIdRef.current)
         return
       }
-      setPos(Math.min(hi, Math.max(lo, t)))
+      setPos(Math.min(hiRef.current, Math.max(loRef.current, t)))
     }, 100)
     return () => window.clearInterval(id)
-  }, [playing, inactive, lo, hi, getCurrentTime])
+  }, [playing, inactive, getCurrentTime, scheduleLoopRestart, clearLoopPause])
 
   const seek = (raw: number) => {
     if (!valid || disabled) return
@@ -247,21 +356,22 @@ function SectionScrubber({
   const togglePlay = () => {
     if (inactive) return
     if (playing) {
-      onStop()
-      setPlaying(false)
+      endSession()
       return
     }
     const from = round1(Math.min(hi, Math.max(lo, posRef.current)))
     // If thumb is at/near the end, restart from section start.
     const startFrom = from >= hi - 0.05 ? lo : from
+    clearLoopPause()
+    claimActiveClip(clipIdRef.current, () => endSessionRef.current())
     setPos(startFrom)
     onPlay(startFrom)
     setPlaying(true)
+    playingRef.current = true
   }
 
   const rel = valid ? round1(Math.max(0, Math.min(hi, pos) - lo)) : 0
   const dur = valid ? round1(Math.max(0, hi - lo)) : 0
-
   return (
     <div className={`section-scrubber${inactive ? ' is-disabled' : ''}`}>
       <div className="section-scrubber-row">
@@ -273,6 +383,21 @@ function SectionScrubber({
           onClick={togglePlay}
         >
           {playing ? '■ Stop' : '▶ Play'}
+        </button>
+        <button
+          type="button"
+          className={`btn tiny loop-toggle${loop ? ' is-on' : ''}`}
+          disabled={inactive}
+          aria-pressed={loop}
+          aria-label={loop ? `Loop ${playLabel} on` : `Loop ${playLabel} off`}
+          title={
+            loop
+              ? 'Loop on: play start→end, pause 3s, repeat until Stop'
+              : 'Loop off: play once'
+          }
+          onClick={() => setLoop((v) => !v)}
+        >
+          ↻ Loop
         </button>
         <input
           type="range"
@@ -298,6 +423,9 @@ function SectionScrubber({
             <>
               <strong>{formatSec(rel)}</strong>
               <span className="section-scrubber-range"> / {formatSec(dur)}</span>
+              {loopPausing ? (
+                <span className="section-scrubber-loop-pause"> · pause</span>
+              ) : null}
             </>
           ) : (
             'Set start & end'
@@ -853,6 +981,7 @@ export function PracticeSections({
         YouTube cuts are the piece template. Select a take, play it below, then Mark Alexia
         start/end from the take’s current time. Until marked, Alexia Play uses start→+20s.
         Continuous — each section starts where the last ended. Type or use ▲▼ / ↑↓ (±0.1s).
+        Loop on a clip: play start→end, pause 3s, repeat until Stop (one clip at a time).
       </p>
 
       {loadError && <p className="error">{loadError}</p>}

@@ -27,7 +27,7 @@ declare global {
   interface Window {
     YT?: {
       Player: new (
-        elementId: string,
+        elementId: string | HTMLElement,
         config: {
           videoId: string
           playerVars?: Record<string, number | string>
@@ -49,6 +49,8 @@ interface YtPlayer {
   seekTo: (seconds: number, allowSeekAhead: boolean) => void
   getCurrentTime: () => number
   getDuration: () => number
+  loadVideoById: (videoId: string) => void
+  cueVideoById: (videoId: string) => void
   destroy: () => void
 }
 
@@ -79,12 +81,18 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
   function YouTubePlayer({ youtubeId, title }, ref) {
     const reactId = useId().replace(/:/g, '')
     const containerId = `yt-player-${reactId}`
+    const hostRef = useRef<HTMLDivElement | null>(null)
     const playerRef = useRef<YtPlayer | null>(null)
     const clipTimerRef = useRef<number | null>(null)
     const clipEndRef = useRef<number | null>(null)
+    const youtubeIdRef = useRef(youtubeId)
+    const titleRef = useRef(title)
     const [ready, setReady] = useState(false)
     const [playing, setPlaying] = useState(false)
     const [error, setError] = useState<string | null>(null)
+
+    youtubeIdRef.current = youtubeId
+    titleRef.current = title
 
     const clearClipWatch = () => {
       if (clipTimerRef.current != null) {
@@ -163,50 +171,79 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
       [ready],
     )
 
+    /** Ensure a fresh empty mount target exists inside the stable host wrapper. */
+    const ensureMountEl = (): HTMLElement | null => {
+      const host = hostRef.current
+      if (!host) return null
+      let el = document.getElementById(containerId)
+      if (el && host.contains(el)) return el
+      // After destroy(), YT may remove/replace the inner div — re-insert a fresh one.
+      host.replaceChildren()
+      el = document.createElement('div')
+      el.id = containerId
+      el.title = `YouTube: ${titleRef.current}`
+      host.appendChild(el)
+      return el
+    }
+
+    const destroyPlayer = () => {
+      if (!playerRef.current) return
+      try {
+        playerRef.current.destroy()
+      } catch {
+        // ignore
+      }
+      playerRef.current = null
+    }
+
+    const createPlayer = (videoId: string): boolean => {
+      if (!window.YT?.Player) return false
+      const el = ensureMountEl()
+      if (!el) return false
+      playerRef.current = new window.YT.Player(el, {
+        videoId,
+        playerVars: {
+          rel: 0,
+          modestbranding: 1,
+          playsinline: 1,
+          enablejsapi: 1,
+          origin: window.location.origin,
+        },
+        events: {
+          onReady: (e) => {
+            const wanted = youtubeIdRef.current
+            if (wanted && wanted !== videoId) {
+              try {
+                e.target.cueVideoById(wanted)
+              } catch {
+                // ignore
+              }
+            }
+            setReady(true)
+            setError(null)
+          },
+          onStateChange: (e) => {
+            const playingState = window.YT?.PlayerState.PLAYING
+            setPlaying(playingState !== undefined && e.data === playingState)
+          },
+        },
+      })
+      return true
+    }
+
+    // Create once on mount; destroy only on unmount.
     useEffect(() => {
       let cancelled = false
       setReady(false)
       setPlaying(false)
       setError(null)
-      clearClipWatch()
 
       void (async () => {
         try {
           await loadYouTubeApi()
           if (cancelled || !window.YT) return
-
-          if (playerRef.current) {
-            try {
-              playerRef.current.destroy()
-            } catch {
-              // ignore
-            }
-            playerRef.current = null
-          }
-
-          const el = document.getElementById(containerId)
-          if (!el) return
-
-          playerRef.current = new window.YT.Player(containerId, {
-            videoId: youtubeId,
-            playerVars: {
-              rel: 0,
-              modestbranding: 1,
-              playsinline: 1,
-              enablejsapi: 1,
-              origin: window.location.origin,
-            },
-            events: {
-              onReady: () => {
-                if (!cancelled) setReady(true)
-              },
-              onStateChange: (e) => {
-                if (cancelled) return
-                const playingState = window.YT?.PlayerState.PLAYING
-                setPlaying(playingState !== undefined && e.data === playingState)
-              },
-            },
-          })
+          destroyPlayer()
+          createPlayer(youtubeIdRef.current)
         } catch (err) {
           console.error(err)
           if (!cancelled) setError('Could not load YouTube controls. Try refreshing the page.')
@@ -216,16 +253,35 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
       return () => {
         cancelled = true
         clearClipWatch()
-        if (playerRef.current) {
-          try {
-            playerRef.current.destroy()
-          } catch {
-            // ignore
+        destroyPlayer()
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- mount/unmount only
+    }, [containerId])
+
+    // When only youtubeId changes: cue/load on the existing player — do not destroy.
+    useEffect(() => {
+      const player = playerRef.current
+      if (!player || !ready) return
+      clearClipWatch()
+      setPlaying(false)
+      try {
+        player.cueVideoById(youtubeId)
+        setError(null)
+      } catch (err) {
+        console.warn('cueVideoById failed; recreating player with fresh mount div', err)
+        destroyPlayer()
+        setReady(false)
+        try {
+          if (!createPlayer(youtubeId)) {
+            setError('Could not load YouTube controls. Try refreshing the page.')
           }
-          playerRef.current = null
+        } catch (err2) {
+          console.error(err2)
+          setError('Could not load YouTube controls. Try refreshing the page.')
         }
       }
-    }, [youtubeId, containerId])
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- swap video only
+    }, [youtubeId, ready])
 
     const skip = (delta: number) => {
       seekTo(getCurrentTime() + delta)
@@ -239,7 +295,10 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
           Audio stays on YouTube — nothing is downloaded.
         </p>
         <div className="video-frame">
-          <div id={containerId} title={`YouTube: ${title}`} />
+          {/* Stable parent: YT.Player may replace/remove the inner mount div on destroy. */}
+          <div ref={hostRef} className="yt-host">
+            <div id={containerId} title={`YouTube: ${title}`} />
+          </div>
         </div>
         <div className="yt-controls" role="group" aria-label="YouTube playback">
           <button type="button" className="btn primary" onClick={play} disabled={!ready}>

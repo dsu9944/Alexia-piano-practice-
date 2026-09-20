@@ -122,7 +122,10 @@
 }
 
 .video-frame iframe,
-.video-frame > div {
+.video-frame > div,
+.video-frame .yt-host,
+.video-frame .yt-host > div,
+.video-frame .yt-host iframe {
   position: absolute;
   inset: 0;
   width: 100%;

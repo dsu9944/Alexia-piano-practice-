@@ -385,10 +385,11 @@ export const PIECE_ID_MIGRATE: Record<string, string> = {
   'minuet-2': 'minuet-2-both',
 }
 
-/** Base id for a *-both / *-rh current id (PracticeSections empty fallback). */
+/** Base id for a *-both / *-rh / *-lh current id (PracticeSections empty fallback). */
 export function legacyBasePieceId(pieceId: string): string | null {
   if (pieceId.endsWith('-both')) return pieceId.slice(0, -'-both'.length)
   if (pieceId.endsWith('-rh')) return pieceId.slice(0, -'-rh'.length)
+  if (pieceId.endsWith('-lh')) return pieceId.slice(0, -'-lh'.length)
   return null
 }
 
@@ -581,11 +582,14 @@ export async function migratePieceIdsOnce(): Promise<PieceIdMigrateResult> {
 
 /**
  * Load practice sections; if empty, try legacy id once and copy forward.
+ * Never overwrite a piece that already has sections (e.g. minuet-2-both must
+ * not be emptied by a fallback to legacy minuet-2).
  */
 export async function getPiecePracticeSectionsWithLegacyFallback(
   pieceId: string,
 ): Promise<{ row: PiecePracticeSections | null; restoredFromLegacy: boolean }> {
   const row = await getPiecePracticeSections(pieceId)
+  // Only fall back when current has no sections — never overwrite existing templates.
   if (row?.sections?.length) {
     return { row, restoredFromLegacy: false }
   }

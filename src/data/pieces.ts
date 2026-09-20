@@ -7,8 +7,9 @@ export const PIECES: Piece[] = [
   { id: 'happy-farmer', title: 'The Happy Farmer', youtubeId: 'whUpzz1yAs0', composer: 'Schumann' },
   { id: 'minuet-1', title: 'Minuet 1 in G, BWV 822', youtubeId: '_7tFgU0neRw', composer: 'Bach' },
 
-  // From Minuet 2: Right Hand + Both Hands.
+  // From Minuet 2: Right Hand + Left Hand + Both Hands.
   { id: 'minuet-2-rh', title: 'Minuet 2 in G — Right Hand', youtubeId: 'bfcmyL8hcRo', composer: 'Bach' },
+  { id: 'minuet-2-lh', title: 'Minuet 2 in G — Left Hand', youtubeId: 'obDC3rsAaEw', composer: 'Bach' },
   { id: 'minuet-2-both', title: 'Minuet 2 in G — Both Hands', youtubeId: '1MNm51HxZ2U', composer: 'Bach' },
   { id: 'minuet-3-rh', title: 'Minuet 3 in Gm, BWV 822 — Right Hand', youtubeId: 'QwMvQeTwvQQ', composer: 'Bach' },
   { id: 'minuet-3-both', title: 'Minuet 3 in Gm, BWV 822 — Both Hands', youtubeId: 'ZMU1HkJEuls', composer: 'Bach' },

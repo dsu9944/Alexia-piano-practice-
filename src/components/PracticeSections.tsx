@@ -11,7 +11,7 @@ import { StarRating } from './StarRating'
 import { StickerPicker } from './StickerPicker'
 import {
   cancelLoopCueBeeps,
-  playLoopGapBeep,
+  scheduleLoopGapBeeps,
   unlockLoopCueAudio,
 } from '../lib/loopCue'
 import type { TakePlayerHandle } from './TakePlayer'
@@ -176,8 +176,6 @@ function SecondsInput({
 
 /** Pause between loop iterations (start→end → wait → repeat). */
 const LOOP_PAUSE_MS = 3000
-/** Countdown beeps during the gap: ~0s, ~1s, ~2s; clip restarts at 3s. */
-const LOOP_CUE_BEEP_AT_MS = [0, 1000, 2000] as const
 
 /**
  * Only one section clip may be in an active play/loop session at a time.
@@ -252,14 +250,11 @@ function SectionScrubber({
   const onStopRef = useRef(onStop)
   onStopRef.current = onStop
   const loopPauseTimerRef = useRef<number | null>(null)
-  const loopCueTimersRef = useRef<number[]>([])
   const clipIdRef = useRef(Symbol(`${playLabel}-clip`))
+  /** Invalidates a pending Play start if Stop/Play races unlock. */
+  const playGenRef = useRef(0)
 
   const clearLoopCues = useCallback(() => {
-    for (const id of loopCueTimersRef.current) {
-      window.clearTimeout(id)
-    }
-    loopCueTimersRef.current = []
     cancelLoopCueBeeps()
   }, [])
 
@@ -273,6 +268,7 @@ function SectionScrubber({
   }, [clearLoopCues])
 
   const endSession = useCallback(() => {
+    playGenRef.current += 1
     clearLoopPause()
     onStopRef.current()
     setPlaying(false)
@@ -311,17 +307,9 @@ function SectionScrubber({
   const scheduleLoopRestart = useCallback(() => {
     if (loopPauseTimerRef.current != null) return
     setLoopPausing(true)
-    unlockLoopCueAudio()
     clearLoopCues()
-    // Three firm countdown beeps at ~0s, ~1s, ~2s; restart at 3s.
-    for (const atMs of LOOP_CUE_BEEP_AT_MS) {
-      loopCueTimersRef.current.push(
-        window.setTimeout(() => {
-          if (!playingRef.current || !loopRef.current) return
-          playLoopGapBeep()
-        }, atMs),
-      )
-    }
+    // Three firm countdown beeps at 0s/1s/2s (AudioContext clock); restart at 3s.
+    void scheduleLoopGapBeeps()
     loopPauseTimerRef.current = window.setTimeout(() => {
       loopPauseTimerRef.current = null
       clearLoopCues()
@@ -391,13 +379,18 @@ function SectionScrubber({
     const from = round1(Math.min(hi, Math.max(lo, posRef.current)))
     // If thumb is at/near the end, restart from section start.
     const startFrom = from >= hi - 0.05 ? lo : from
-    unlockLoopCueAudio()
-    clearLoopPause()
-    claimActiveClip(clipIdRef.current, () => endSessionRef.current())
-    setPos(startFrom)
-    onPlay(startFrom)
-    setPlaying(true)
-    playingRef.current = true
+    const gen = ++playGenRef.current
+    // Safari: unlock AudioContext during this click before starting the clip.
+    void (async () => {
+      await unlockLoopCueAudio()
+      if (gen !== playGenRef.current) return
+      clearLoopPause()
+      claimActiveClip(clipIdRef.current, () => endSessionRef.current())
+      setPos(startFrom)
+      onPlay(startFrom)
+      setPlaying(true)
+      playingRef.current = true
+    })()
   }
 
   const rel = valid ? round1(Math.max(0, Math.min(hi, pos) - lo)) : 0

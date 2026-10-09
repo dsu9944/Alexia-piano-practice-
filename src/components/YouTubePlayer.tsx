@@ -29,11 +29,13 @@ declare global {
       Player: new (
         elementId: string | HTMLElement,
         config: {
-          videoId: string
+          videoId?: string
+          host?: string
           playerVars?: Record<string, number | string>
           events?: {
             onReady?: (e: { target: YtPlayer }) => void
             onStateChange?: (e: { data: number; target: YtPlayer }) => void
+            onError?: (e: { data: number; target: YtPlayer }) => void
           }
         },
       ) => YtPlayer
@@ -55,6 +57,28 @@ interface YtPlayer {
 }
 
 const SKIP_SEC = 10
+const YT_HOST = 'https://www.youtube.com'
+/** YouTube rejects embeds without a valid Referer (errors 152/153) — always send origin. */
+const REFERRER_POLICY = 'strict-origin-when-cross-origin'
+/** 2 bad id, 5 HTML5 error, 100 not found, 101/150 embed disabled, 152/153 referrer/identity rejected. */
+const EMBED_BLOCK_CODES = new Set([2, 5, 100, 101, 150, 152, 153])
+
+function watchUrl(videoId: string, startSec?: number | null): string {
+  const t = startSec != null && startSec > 0 ? `&t=${Math.floor(startSec)}s` : ''
+  return `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}${t}`
+}
+
+function embedSrc(videoId: string): string {
+  const params = new URLSearchParams({
+    enablejsapi: '1',
+    origin: window.location.origin,
+    widget_referrer: window.location.href,
+    rel: '0',
+    modestbranding: '1',
+    playsinline: '1',
+  })
+  return `${YT_HOST}/embed/${encodeURIComponent(videoId)}?${params.toString()}`
+}
 
 let apiLoadPromise: Promise<void> | null = null
 
@@ -90,6 +114,9 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
     const [ready, setReady] = useState(false)
     const [playing, setPlaying] = useState(false)
     const [error, setError] = useState<string | null>(null)
+    const [embedErrorCode, setEmbedErrorCode] = useState<number | null>(null)
+    const lastClipStartRef = useRef<number | null>(null)
+    const [fallbackStart, setFallbackStart] = useState<number | null>(null)
 
     youtubeIdRef.current = youtubeId
     titleRef.current = title
@@ -138,6 +165,7 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
       const player = playerRef.current
       if (!player) return
       const start = Math.max(0, startSec)
+      lastClipStartRef.current = start
       const end = Math.max(start + 0.15, endSec)
       clearClipWatch()
       clipEndRef.current = end
@@ -186,6 +214,27 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
       return el
     }
 
+    /**
+     * Build the iframe ourselves so referrerpolicy is set BEFORE the first request.
+     * The IFrame API then attaches to it (requires enablejsapi=1 in src).
+     */
+    const createIframe = (mount: HTMLElement, videoId: string): HTMLIFrameElement => {
+      const iframe = document.createElement('iframe')
+      iframe.id = containerId
+      iframe.title = `YouTube: ${titleRef.current}`
+      iframe.setAttribute('referrerpolicy', REFERRER_POLICY)
+      iframe.referrerPolicy = REFERRER_POLICY
+      iframe.setAttribute(
+        'allow',
+        'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share',
+      )
+      iframe.setAttribute('allowfullscreen', '')
+      iframe.setAttribute('frameborder', '0')
+      iframe.src = embedSrc(videoId)
+      mount.replaceWith(iframe)
+      return iframe
+    }
+
     const destroyPlayer = () => {
       if (!playerRef.current) return
       try {
@@ -200,16 +249,29 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
       if (!window.YT?.Player) return false
       const el = ensureMountEl()
       if (!el) return false
-      playerRef.current = new window.YT.Player(el, {
-        videoId,
+      const iframe = createIframe(el, videoId)
+      setEmbedErrorCode(null)
+      playerRef.current = new window.YT.Player(iframe, {
+        host: YT_HOST,
         playerVars: {
           rel: 0,
           modestbranding: 1,
           playsinline: 1,
           enablejsapi: 1,
           origin: window.location.origin,
+          widget_referrer: window.location.href,
         },
         events: {
+          onError: (e) => {
+            const code = Number(e.data)
+            console.warn('YouTube player error', code, youtubeIdRef.current)
+            setPlaying(false)
+            if (EMBED_BLOCK_CODES.has(code)) {
+              clearClipWatch()
+              setFallbackStart(lastClipStartRef.current)
+              setEmbedErrorCode(code)
+            }
+          },
           onReady: (e) => {
             const wanted = youtubeIdRef.current
             if (wanted && wanted !== videoId) {
@@ -264,6 +326,8 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
       if (!player || !ready) return
       clearClipWatch()
       setPlaying(false)
+      setEmbedErrorCode(null)
+      lastClipStartRef.current = null
       try {
         player.cueVideoById(youtubeId)
         setError(null)
@@ -318,6 +382,22 @@ export const YouTubePlayer = forwardRef<YouTubePlayerHandle, Props>(
           <p className="yt-status hint" aria-live="polite">
             {playing ? 'Playing…' : 'Paused'}
           </p>
+        )}
+        {embedErrorCode != null && (
+          <div className="yt-fallback" role="alert">
+            <p>
+              YouTube won’t play this video inside the app right now (code {embedErrorCode}). You can still
+              watch it on YouTube.
+            </p>
+            <a
+              className="btn primary"
+              href={watchUrl(youtubeId, fallbackStart)}
+              target="_blank"
+              rel="noopener"
+            >
+              ▶ Open on YouTube{fallbackStart != null && fallbackStart > 0 ? ` (from ${Math.floor(fallbackStart / 60)}:${String(Math.floor(fallbackStart % 60)).padStart(2, '0')})` : ''}
+            </a>
+          </div>
         )}
         {error && <p className="error">{error}</p>}
       </div>
